@@ -92,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=32,
         help="Maximum bars to hold each hindsight simulation",
     )
+    daily_review_parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Print only a compact execution summary instead of the full review payload",
+    )
     subparsers.add_parser("optimize", help="Search parameter sets and instrument subsets")
     subparsers.add_parser("monte-carlo", help="Run Monte Carlo robustness analysis on a fresh backtest")
     walk_forward_parser = subparsers.add_parser(
@@ -404,15 +409,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "daily-review":
+        payload = orchestrator.run_daily_review(
+            report_date=args.date,
+            days=args.days,
+            max_signal_rows=args.max_signal_rows,
+            max_ml_candidates=args.max_ml_candidates,
+            max_holding_bars=args.max_holding_bars,
+        )
+        if args.summary_only:
+            payload = _daily_review_cli_summary(payload)
         print(
             json.dumps(
-                orchestrator.run_daily_review(
-                    report_date=args.date,
-                    days=args.days,
-                    max_signal_rows=args.max_signal_rows,
-                    max_ml_candidates=args.max_ml_candidates,
-                    max_holding_bars=args.max_holding_bars,
-                ),
+                payload,
                 ensure_ascii=False,
                 indent=2,
             )
@@ -551,6 +559,21 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.print_help(sys.stderr)
     return 2
+
+
+def _daily_review_cli_summary(payload: dict[str, object]) -> dict[str, object]:
+    signal_scan = dict(payload.get("signal_scan", {}))
+    actual_day = dict(payload.get("actual_day", {}))
+    recommendations = list(payload.get("recommendations", []))
+    return {
+        "generated_at": payload.get("generated_at"),
+        "period": payload.get("period", {}),
+        "actual_day": actual_day,
+        "signal_scan": signal_scan,
+        "top_recommendations": recommendations[:3],
+        "latest_path": payload.get("latest_path"),
+        "output_dir": payload.get("output_dir"),
+    }
 
 
 if __name__ == "__main__":

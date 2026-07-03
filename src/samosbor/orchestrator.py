@@ -627,13 +627,13 @@ class TradingOrchestrator:
             max_ml_candidates=max_ml_candidates,
             max_holding_bars=max_holding_bars,
         )
-        latest_path = daily_review_path(state_path)
-        save_daily_review(latest_path, payload)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         output_dir = self.config.resolve_path(self.config.reporting.output_dir) / "daily-review" / stamp
-        write_daily_review(output_dir, payload)
+        latest_path = daily_review_path(state_path)
         payload["latest_path"] = str(latest_path)
         payload["output_dir"] = str(output_dir)
+        save_daily_review(latest_path, payload)
+        write_daily_review(output_dir, payload)
         return payload
 
     def tune_entry_schedule(
