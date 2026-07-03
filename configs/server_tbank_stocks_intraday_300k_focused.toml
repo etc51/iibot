@@ -226,7 +226,7 @@ forced_flat_hours = []
 forced_flat_weekdays = []
 entry_confirmation_timeframe = "5min"
 entry_confirmation_min_bars = 3
-entry_confirmation_max_adverse_ret = 0.0015
+entry_confirmation_max_adverse_ret = 0.005
 
 [risk]
 max_risk_per_trade = 0.01

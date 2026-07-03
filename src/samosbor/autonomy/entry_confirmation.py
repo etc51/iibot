@@ -14,7 +14,7 @@ def build_entry_confirmation_context(
     primary_timeframe: str,
     confirmation_timeframe: str,
     min_bars: int = 3,
-    max_adverse_ret: float = 0.0015,
+    max_adverse_ret: float = 0.005,
 ) -> dict[str, object]:
     if not confirmation_timeframe.strip():
         return {"available": False, "enabled": False}
@@ -57,19 +57,11 @@ def build_entry_confirmation_context(
     against_direction = False
     reason = ""
     if normalized_direction == "short":
-        against_direction = (
-            ret_window > max_adverse_ret
-            or ret_last > max_adverse_ret
-            or (ema_fast is not None and latest.close > ema_fast and adverse_bars >= 2)
-        )
+        against_direction = ret_window > max_adverse_ret
         if against_direction:
             reason = "5m rebound against short"
     elif normalized_direction == "long":
-        against_direction = (
-            ret_window < -max_adverse_ret
-            or ret_last < -max_adverse_ret
-            or (ema_fast is not None and latest.close < ema_fast and adverse_bars >= 2)
-        )
+        against_direction = ret_window < -max_adverse_ret
         if against_direction:
             reason = "5m pullback against long"
 

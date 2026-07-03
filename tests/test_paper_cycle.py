@@ -662,7 +662,7 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
                         "min_liquidity_rub = 1.0",
                         'entry_confirmation_timeframe = "5min"',
                         "entry_confirmation_min_bars = 3",
-                        "entry_confirmation_max_adverse_ret = 0.0015",
+                        "entry_confirmation_max_adverse_ret = 0.005",
                         "",
                         "[execution]",
                         'mode = "local-paper"',
