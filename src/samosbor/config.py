@@ -107,6 +107,12 @@ class StrategySection:
     entry_confirmation_timeframe: str = ""
     entry_confirmation_min_bars: int = 3
     entry_confirmation_max_adverse_ret: float = 0.005
+    adaptive_entry_enabled: bool = False
+    adaptive_entry_max_chase_atr: float = 0.5
+    alternative_plan_enabled: bool = False
+    alternative_plan_entry_offset_bars: int = 2
+    alternative_plan_atr_stop_multiple: float = 1.0
+    alternative_plan_reward_to_risk: float = 2.0
 
 
 @dataclass(frozen=True)

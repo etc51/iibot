@@ -11,6 +11,10 @@ from .autonomy.entry_schedule import (
     build_entry_schedule_tuning_payload,
     write_entry_schedule_tuning,
 )
+from .autonomy.adaptive_entry import (
+    adaptive_entry_block_reason,
+    build_adaptive_entry_context,
+)
 from .autonomy.entry_confirmation import build_entry_confirmation_context
 from .autonomy.entry_quality_tuning import (
     build_entry_quality_tuning_payload,
@@ -1108,6 +1112,7 @@ class TradingOrchestrator:
                     broker.trades,
                     timestamp=latest.timestamp,
                 )
+                signal = self._signal_with_adaptive_entry_context(signal, candles, broker.events)
             if shadow_signal is not None:
                 shadow_signal = self._signal_with_entry_candle_context(shadow_signal, candles)
                 shadow_signal = self._signal_with_entry_confirmation_context(
@@ -1166,6 +1171,22 @@ class TradingOrchestrator:
                             "direction": signal.direction.value,
                             "strength": signal.strength,
                             "quantity_lots": 0,
+                        }
+                    )
+                    continue
+                adaptive_block_reason = adaptive_entry_block_reason(signal)
+                if adaptive_block_reason is not None:
+                    cycle_events.append(
+                        {
+                            "timestamp": latest.timestamp.isoformat(),
+                            "symbol": instrument.symbol,
+                            "action": "signal",
+                            "approved": False,
+                            "reason": adaptive_block_reason,
+                            "direction": signal.direction.value,
+                            "strength": signal.strength,
+                            "quantity_lots": 0,
+                            "metadata": dict(signal.metadata),
                         }
                     )
                     continue
@@ -1292,6 +1313,17 @@ class TradingOrchestrator:
             confirmation_timeframe=self.config.strategy.entry_confirmation_timeframe,
             min_bars=self.config.strategy.entry_confirmation_min_bars,
             max_adverse_ret=self.config.strategy.entry_confirmation_max_adverse_ret,
+        )
+        return replace(signal, metadata=metadata)
+
+    def _signal_with_adaptive_entry_context(self, signal, candles, prior_events):
+        metadata = dict(signal.metadata)
+        metadata["adaptive_entry"] = build_adaptive_entry_context(
+            signal,
+            candles,
+            self.config.strategy,
+            prior_events=prior_events,
+            timeframe=self.config.data.timeframe,
         )
         return replace(signal, metadata=metadata)
 

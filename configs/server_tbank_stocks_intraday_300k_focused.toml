@@ -227,6 +227,12 @@ forced_flat_weekdays = []
 entry_confirmation_timeframe = "5min"
 entry_confirmation_min_bars = 3
 entry_confirmation_max_adverse_ret = 0.005
+adaptive_entry_enabled = true
+adaptive_entry_max_chase_atr = 0.5
+alternative_plan_enabled = true
+alternative_plan_entry_offset_bars = 2
+alternative_plan_atr_stop_multiple = 1.0
+alternative_plan_reward_to_risk = 2.0
 
 [risk]
 max_risk_per_trade = 0.01

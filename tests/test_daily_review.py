@@ -44,6 +44,10 @@ def _config(root: Path, instrument: Instrument) -> AppConfig:
             min_trend_strength=0.0,
             min_liquidity_rub=1.0,
             allowed_entry_weekdays=[],
+            alternative_plan_enabled=True,
+            alternative_plan_entry_offset_bars=2,
+            alternative_plan_atr_stop_multiple=1.0,
+            alternative_plan_reward_to_risk=2.0,
         ),
         risk=RiskSection(),
         execution=ExecutionSection(
@@ -100,6 +104,12 @@ def test_daily_review_finds_missed_positive_candidates(tmp_path: Path):
     first = payload["missed_opportunities"][0]
     assert first["symbol"] == "TEST"
     assert first["best_plan"]["net_pnl_per_lot_rub"] > 0
+    tracked = payload["grid_summary"]["tracked_alternative_plan"]
+    assert tracked["enabled"] is True
+    assert tracked["mode"] == "observe-only"
+    assert tracked["entry_offset_bars"] == 2
+    assert tracked["stop_multiple"] == 1.0
+    assert tracked["reward_to_risk"] == 2.0
 
 
 def test_daily_review_reviews_actual_trade_and_writes_files(tmp_path: Path):

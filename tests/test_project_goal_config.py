@@ -23,6 +23,12 @@ def test_focused_runtime_matches_project_goal():
     assert config.strategy.forced_flat_hours == []
     assert config.strategy.entry_confirmation_timeframe == "5min"
     assert config.strategy.entry_confirmation_max_adverse_ret == 0.005
+    assert config.strategy.adaptive_entry_enabled is True
+    assert config.strategy.adaptive_entry_max_chase_atr == 0.5
+    assert config.strategy.alternative_plan_enabled is True
+    assert config.strategy.alternative_plan_entry_offset_bars == 2
+    assert config.strategy.alternative_plan_atr_stop_multiple == 1.0
+    assert config.strategy.alternative_plan_reward_to_risk == 2.0
     assert config.backtest.initial_cash == 300_000
     assert effective_target_daily_profit_rub(config.research, config.backtest) == 2_000.0
     assert effective_target_monthly_profit_rub(config.research, config.backtest) == 40_000.0
