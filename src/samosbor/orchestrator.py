@@ -1264,6 +1264,10 @@ class TradingOrchestrator:
                                 quantity_lots=decision.quantity_lots,
                             )
                     if microstructure_block_reason is None:
+                        signal_for_entry, decision = self._apply_adaptive_size_adjustment(
+                            signal_for_entry,
+                            decision,
+                        )
                         signal_for_entry, decision = self._apply_learning_size_adjustment(
                             signal_for_entry,
                             decision,
@@ -1495,6 +1499,34 @@ class TradingOrchestrator:
             "runner_profit_lock_ratio": strategy.runner_profit_lock_ratio,
             "runner_atr_window": strategy.atr_window,
         }
+
+    def _apply_adaptive_size_adjustment(self, signal, decision):
+        metadata = dict(signal.metadata)
+        adaptive = metadata.get("adaptive_entry", {})
+        if not isinstance(adaptive, dict):
+            return signal, decision
+        size_factor = float(adaptive.get("size_factor", 1.0) or 1.0)
+        if size_factor >= 1.0 or size_factor <= 0.0 or decision.quantity_lots <= 1:
+            return signal, decision
+
+        original_quantity = int(decision.quantity_lots)
+        adjusted_quantity = max(1, int(original_quantity * size_factor))
+        if adjusted_quantity >= original_quantity:
+            return signal, decision
+
+        ratio = adjusted_quantity / original_quantity
+        metadata["adaptive_size_adjustment"] = {
+            "reason": str(adaptive.get("action", "adaptive reduced-size entry")),
+            "original_quantity_lots": original_quantity,
+            "adjusted_quantity_lots": adjusted_quantity,
+            "factor": round(ratio, 4),
+        }
+        adjusted_decision = replace(
+            decision,
+            quantity_lots=adjusted_quantity,
+            estimated_notional_rub=decision.estimated_notional_rub * ratio,
+        )
+        return replace(signal, metadata=metadata), adjusted_decision
 
     def _apply_learning_size_adjustment(self, signal, decision):
         metadata = dict(signal.metadata)

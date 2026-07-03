@@ -1162,6 +1162,75 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
                 5,
             )
 
+    def test_adaptive_size_adjustment_halves_reduced_entry(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_dir = root / "configs"
+            config_dir.mkdir(parents=True)
+            config_path = config_dir / "paper.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[app]",
+                        'timezone = "Europe/Moscow"',
+                        "",
+                        "[data]",
+                        "",
+                        "[strategy]",
+                        "",
+                        "[execution]",
+                        'mode = "local-paper"',
+                        "allow_live_trading = false",
+                        "",
+                        "[backtest]",
+                        "",
+                        "[reporting]",
+                        "",
+                        "[research]",
+                        "",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            instrument = Instrument(symbol="CHMF", instrument_type=InstrumentType.STOCK, lot_size=1)
+            signal = Signal(
+                instrument=instrument,
+                direction=SignalDirection.SHORT,
+                strength=0.8,
+                entry_price=100.0,
+                stop_price=101.0,
+                take_profit=97.5,
+                reason="test",
+                metadata={
+                    "adaptive_entry": {
+                        "action": "enter-reduced-5m-market-confirmed",
+                        "size_factor": 0.5,
+                    }
+                },
+            )
+            decision = RiskDecision(
+                True,
+                "approved",
+                quantity_lots=11,
+                risk_budget_rub=1000.0,
+                estimated_notional_rub=1100.0,
+            )
+            orchestrator = _PaperCycleOrchestrator(config, _FakeProvider([], {}))
+
+            adjusted_signal, adjusted_decision = orchestrator._apply_adaptive_size_adjustment(signal, decision)
+
+            self.assertEqual(adjusted_decision.quantity_lots, 5)
+            self.assertEqual(
+                adjusted_signal.metadata["adaptive_size_adjustment"]["original_quantity_lots"],
+                11,
+            )
+            self.assertEqual(
+                adjusted_signal.metadata["adaptive_size_adjustment"]["adjusted_quantity_lots"],
+                5,
+            )
+
     def test_paper_cycle_records_shadow_evidence_outside_runtime_entry_hours(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
