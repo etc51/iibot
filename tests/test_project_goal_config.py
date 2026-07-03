@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from samosbor.autonomy.ml_learning import LOW_QUALITY_PROBABILITY_THRESHOLD
 from samosbor.config import load_config
 from samosbor.domain import TradeMode
 from samosbor.research.targets import (
@@ -14,6 +15,7 @@ def test_focused_runtime_matches_project_goal():
 
     assert config.execution.mode == TradeMode.LOCAL_PAPER
     assert config.execution.allow_live_trading is False
+    assert LOW_QUALITY_PROBABILITY_THRESHOLD >= 0.40
     assert config.execution.commission_bps == 4.0
     assert config.data.tbank_candle_source == "include-weekend"
     assert config.strategy.allowed_entry_hours == []

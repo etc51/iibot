@@ -38,6 +38,7 @@ from .autonomy.effective_config import (
 from .autonomy.ml_learning import (
     COMMISSION_EDGE_TAG,
     LATE_REENTRY_TAG,
+    LOW_QUALITY_PROBABILITY_THRESHOLD,
     LOW_QUALITY_TAG,
     NEGATIVE_EXPECTANCY_TAG,
     SHORT_AFTER_EXHAUSTION_TAG,
@@ -1342,7 +1343,7 @@ class TradingOrchestrator:
         should_reduce = (
             LOW_QUALITY_TAG in tags
             or NEGATIVE_EXPECTANCY_TAG in tags
-            or float(learning.get("probability_profit", 1.0) or 1.0) < 0.40
+            or float(learning.get("probability_profit", 1.0) or 1.0) < LOW_QUALITY_PROBABILITY_THRESHOLD
         )
         if not should_reduce or decision.quantity_lots <= 1:
             return signal, decision
@@ -1390,8 +1391,11 @@ class TradingOrchestrator:
             probability = float(learning.get("probability_profit", 1.0) or 1.0)
             expected_position = float(learning.get("expected_pnl_position_rub", 0.0) or 0.0)
             required_edge = float(learning.get("required_net_edge_rub", 0.0) or 0.0)
-            if probability < 0.40 or LOW_QUALITY_TAG in learning_tags:
-                return f"entry blocked by low ML probability ({probability:.2f} < 0.40)"
+            if probability < LOW_QUALITY_PROBABILITY_THRESHOLD or LOW_QUALITY_TAG in learning_tags:
+                return (
+                    "entry blocked by low ML probability "
+                    f"({probability:.2f} < {LOW_QUALITY_PROBABILITY_THRESHOLD:.2f})"
+                )
             if expected_position < 0 or NEGATIVE_EXPECTANCY_TAG in learning_tags:
                 return f"entry blocked by negative ML expectancy ({expected_position:.2f} RUB)"
             if COMMISSION_EDGE_TAG in learning_tags:
