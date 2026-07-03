@@ -20,6 +20,12 @@ from .autonomy.entry_symbols import (
     build_entry_symbol_tuning_payload,
     write_entry_symbol_tuning,
 )
+from .autonomy.daily_review import (
+    build_daily_review_payload,
+    daily_review_path,
+    save_daily_review,
+    write_daily_review,
+)
 from .autonomy.effective_config import (
     align_effective_config_sources,
     base_strategy_values,
@@ -585,6 +591,47 @@ class TradingOrchestrator:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         output_dir = self.config.resolve_path(self.config.reporting.output_dir) / "trade-review" / stamp
         write_trade_review(output_dir, payload)
+        payload["latest_path"] = str(latest_path)
+        payload["output_dir"] = str(output_dir)
+        return payload
+
+    def run_daily_review(
+        self,
+        *,
+        report_date: str | None = None,
+        days: int = 1,
+        max_signal_rows: int = 250,
+        max_ml_candidates: int = 60,
+        max_holding_bars: int = 32,
+    ) -> dict[str, object]:
+        broker = self._load_paper_broker()
+        state_path = self.config.resolve_path(self.config.execution.state_path)
+        provider = self._data_provider()
+        instruments = provider.resolve_universe(self.config.data.instruments)
+        candles_by_symbol = provider.load_history(instruments)
+        instruments_by_symbol = {instrument.symbol: instrument for instrument in instruments}
+        confirmation_history = self._load_entry_confirmation_history(provider, instruments, candles_by_symbol)
+        feedback = load_signal_feedback(signal_feedback_path(state_path))
+        parsed_date = date.fromisoformat(report_date) if report_date else None
+        payload = build_daily_review_payload(
+            self.config,
+            broker.portfolio,
+            broker.trades,
+            candles_by_symbol=candles_by_symbol,
+            instruments_by_symbol=instruments_by_symbol,
+            confirmation_history_by_symbol=confirmation_history,
+            feedback_payload=feedback,
+            report_date=parsed_date,
+            days=days,
+            max_signal_rows=max_signal_rows,
+            max_ml_candidates=max_ml_candidates,
+            max_holding_bars=max_holding_bars,
+        )
+        latest_path = daily_review_path(state_path)
+        save_daily_review(latest_path, payload)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        output_dir = self.config.resolve_path(self.config.reporting.output_dir) / "daily-review" / stamp
+        write_daily_review(output_dir, payload)
         payload["latest_path"] = str(latest_path)
         payload["output_dir"] = str(output_dir)
         return payload

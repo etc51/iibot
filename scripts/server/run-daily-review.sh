@@ -23,4 +23,6 @@ python scripts/server/update-offline-parquet-cache.py \
   --config "$ACTIVE_CONFIG" \
   --parquet-dir "$AUTONOMY_PARQUET_DIR"
 
+python -m samosbor.cli --config "$ACTIVE_CONFIG" daily-review
+
 python -m samosbor.cli --config "$AUTONOMY_CONFIG" nightly-autonomy --base-config "$BASE_CONFIG" --effective-output "$EFFECTIVE_CONFIG"

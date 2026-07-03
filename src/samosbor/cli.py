@@ -68,6 +68,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=100,
         help="Number of latest closed trades to review",
     )
+    daily_review_parser = subparsers.add_parser(
+        "daily-review",
+        help="Analyze the full day: actual trades, missed entries, stop/take alternatives, and ML labels",
+    )
+    daily_review_parser.add_argument("--days", type=int, default=1, help="Lookback window in days")
+    daily_review_parser.add_argument("--date", help="Anchor ISO date in report timezone, defaults to today")
+    daily_review_parser.add_argument(
+        "--max-signal-rows",
+        type=int,
+        default=250,
+        help="Maximum candidate signal rows to keep in the JSON report",
+    )
+    daily_review_parser.add_argument(
+        "--max-ml-candidates",
+        type=int,
+        default=60,
+        help="Maximum candidate signals to score with the ML feedback model",
+    )
+    daily_review_parser.add_argument(
+        "--max-holding-bars",
+        type=int,
+        default=32,
+        help="Maximum bars to hold each hindsight simulation",
+    )
     subparsers.add_parser("optimize", help="Search parameter sets and instrument subsets")
     subparsers.add_parser("monte-carlo", help="Run Monte Carlo robustness analysis on a fresh backtest")
     walk_forward_parser = subparsers.add_parser(
@@ -374,6 +398,21 @@ def main(argv: list[str] | None = None) -> int:
         print(
             json.dumps(
                 orchestrator.run_trade_review(lookback_trades=args.lookback_trades),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    if args.command == "daily-review":
+        print(
+            json.dumps(
+                orchestrator.run_daily_review(
+                    report_date=args.date,
+                    days=args.days,
+                    max_signal_rows=args.max_signal_rows,
+                    max_ml_candidates=args.max_ml_candidates,
+                    max_holding_bars=args.max_holding_bars,
+                ),
                 ensure_ascii=False,
                 indent=2,
             )
