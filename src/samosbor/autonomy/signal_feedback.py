@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..analysis.indicators import atr
+from ..autonomy.runner import runner_breakeven_stop, runner_extreme_price, runner_trailing_stop
 from ..domain import Candle, ExitReason, Instrument, InstrumentType, Signal, SignalDirection, TradeRecord
 from ..execution.paper import LocalPaperBroker
 
@@ -41,6 +43,11 @@ def record_shadow_signal(
     quantity_lots: int = 1,
     slippage_bps: float = 0.0,
     commission_bps: float = 0.0,
+    runner_enabled: bool = False,
+    runner_breakeven_buffer_bps: float = 0.0,
+    runner_trailing_atr_multiple: float = 0.0,
+    runner_profit_lock_ratio: float = 0.0,
+    runner_atr_window: int = 14,
 ) -> None:
     signature = (
         signal.instrument.symbol,
@@ -64,6 +71,11 @@ def record_shadow_signal(
             quantity_lots=quantity_lots,
             slippage_bps=slippage_bps,
             commission_bps=commission_bps,
+            runner_enabled=runner_enabled,
+            runner_breakeven_buffer_bps=runner_breakeven_buffer_bps,
+            runner_trailing_atr_multiple=runner_trailing_atr_multiple,
+            runner_profit_lock_ratio=runner_profit_lock_ratio,
+            runner_atr_window=runner_atr_window,
         )
     )
 
@@ -173,6 +185,11 @@ def simulate_signal_feedback(
     quantity_lots: int = 1,
     slippage_bps: float = 0.0,
     commission_bps: float = 0.0,
+    runner_enabled: bool = False,
+    runner_breakeven_buffer_bps: float = 0.0,
+    runner_trailing_atr_multiple: float = 0.0,
+    runner_profit_lock_ratio: float = 0.0,
+    runner_atr_window: int = 14,
 ) -> dict[str, object] | None:
     item = _shadow_signal_item(
         signal,
@@ -181,6 +198,11 @@ def simulate_signal_feedback(
         quantity_lots=quantity_lots,
         slippage_bps=slippage_bps,
         commission_bps=commission_bps,
+        runner_enabled=runner_enabled,
+        runner_breakeven_buffer_bps=runner_breakeven_buffer_bps,
+        runner_trailing_atr_multiple=runner_trailing_atr_multiple,
+        runner_profit_lock_ratio=runner_profit_lock_ratio,
+        runner_atr_window=runner_atr_window,
     )
     return _resolve_signal_item(item, future_candles)
 
@@ -281,6 +303,11 @@ def _shadow_signal_item(
     quantity_lots: int,
     slippage_bps: float,
     commission_bps: float,
+    runner_enabled: bool,
+    runner_breakeven_buffer_bps: float,
+    runner_trailing_atr_multiple: float,
+    runner_profit_lock_ratio: float,
+    runner_atr_window: int,
 ) -> dict[str, object]:
     instrument = signal.instrument
     return {
@@ -305,6 +332,11 @@ def _shadow_signal_item(
         "tick_value": float(instrument.tick_value),
         "slippage_bps": float(slippage_bps),
         "commission_bps": float(commission_bps),
+        "runner_enabled": bool(runner_enabled),
+        "runner_breakeven_buffer_bps": float(runner_breakeven_buffer_bps),
+        "runner_trailing_atr_multiple": float(runner_trailing_atr_multiple),
+        "runner_profit_lock_ratio": float(runner_profit_lock_ratio),
+        "runner_atr_window": int(runner_atr_window),
     }
 
 
@@ -315,9 +347,15 @@ def _resolve_signal_item(item: dict[str, object], candles: list[Candle]) -> dict
         return None
 
     direction = SignalDirection(str(item["direction"]))
+    entry_price = float(item["entry_price"])
     stop_price = float(item["stop_price"])
     take_profit = float(item["take_profit"])
     horizon_bars = int(item.get("horizon_bars", 24))
+    runner_enabled = bool(item.get("runner_enabled", False))
+    runner_active = False
+    runner_activated_at = ""
+    runner_activation_price = 0.0
+    runner_extreme = 0.0
 
     for index, candle in enumerate(future_candles, start=1):
         exit_price = None
@@ -325,17 +363,70 @@ def _resolve_signal_item(item: dict[str, object], candles: list[Candle]) -> dict
         if direction == SignalDirection.LONG:
             if candle.low <= stop_price:
                 exit_price = stop_price
-                outcome_reason = "stop-loss"
-            elif candle.high >= take_profit:
-                exit_price = take_profit
-                outcome_reason = "take-profit"
+                outcome_reason = _stop_outcome_reason(direction, entry_price, stop_price)
+            elif candle.high >= take_profit and not runner_active:
+                if runner_enabled:
+                    runner_active = True
+                    runner_activated_at = candle.timestamp.isoformat()
+                    runner_activation_price = take_profit
+                    runner_extreme = runner_extreme_price(
+                        direction=direction,
+                        current_extreme=runner_extreme,
+                        candle=candle,
+                        activation_price=take_profit,
+                    )
+                    stop_price = runner_breakeven_stop(
+                        direction=direction,
+                        entry_price=entry_price,
+                        buffer_bps=float(item.get("runner_breakeven_buffer_bps", 0.0)),
+                    )
+                else:
+                    exit_price = take_profit
+                    outcome_reason = "take-profit"
         else:
             if candle.high >= stop_price:
                 exit_price = stop_price
-                outcome_reason = "stop-loss"
-            elif candle.low <= take_profit:
-                exit_price = take_profit
-                outcome_reason = "take-profit"
+                outcome_reason = _stop_outcome_reason(direction, entry_price, stop_price)
+            elif candle.low <= take_profit and not runner_active:
+                if runner_enabled:
+                    runner_active = True
+                    runner_activated_at = candle.timestamp.isoformat()
+                    runner_activation_price = take_profit
+                    runner_extreme = runner_extreme_price(
+                        direction=direction,
+                        current_extreme=runner_extreme,
+                        candle=candle,
+                        activation_price=take_profit,
+                    )
+                    stop_price = runner_breakeven_stop(
+                        direction=direction,
+                        entry_price=entry_price,
+                        buffer_bps=float(item.get("runner_breakeven_buffer_bps", 0.0)),
+                    )
+                else:
+                    exit_price = take_profit
+                    outcome_reason = "take-profit"
+
+        if exit_price is None and runner_active:
+            runner_extreme = runner_extreme_price(
+                direction=direction,
+                current_extreme=runner_extreme,
+                candle=candle,
+                activation_price=runner_activation_price or take_profit,
+            )
+            visible_candles = [seen for seen in candles if seen.timestamp <= candle.timestamp]
+            new_stop = runner_trailing_stop(
+                direction=direction,
+                entry_price=entry_price,
+                current_stop=stop_price,
+                extreme_price=runner_extreme,
+                atr_value=atr(visible_candles, int(item.get("runner_atr_window", 14))),
+                atr_multiple=float(item.get("runner_trailing_atr_multiple", 0.0)),
+                lock_ratio=float(item.get("runner_profit_lock_ratio", 0.0)),
+                breakeven_buffer_bps=float(item.get("runner_breakeven_buffer_bps", 0.0)),
+            )
+            if new_stop is not None:
+                stop_price = new_stop
 
         if exit_price is None and index >= horizon_bars:
             exit_price = candle.close
@@ -364,6 +455,10 @@ def _resolve_signal_item(item: dict[str, object], candles: list[Candle]) -> dict
             "exit_commission": round(_exit_commission_from_item(item, trade), 6),
             "bars_held": index,
             "outcome_reason": outcome_reason,
+            "final_stop_price": round(stop_price, 6),
+            "runner_activated": runner_active or bool(runner_activated_at),
+            "runner_activated_at": runner_activated_at,
+            "runner_extreme_price": round(runner_extreme, 6),
         }
 
     return None
@@ -427,9 +522,23 @@ def _instrument_from_item(item: dict[str, object]) -> Instrument:
 def _close_reason_for_outcome(outcome_reason: str) -> ExitReason:
     if outcome_reason == "stop-loss":
         return ExitReason.STOP_LOSS
+    if outcome_reason == "breakeven-stop":
+        return ExitReason.BREAKEVEN_STOP
+    if outcome_reason == "profit-protect-stop":
+        return ExitReason.PROFIT_PROTECT_STOP
     if outcome_reason == "take-profit":
         return ExitReason.TAKE_PROFIT
     return ExitReason.END_OF_TEST
+
+
+def _stop_outcome_reason(direction: SignalDirection, entry_price: float, stop_price: float) -> str:
+    if abs(stop_price - entry_price) <= max(1e-9, abs(entry_price) * 1e-9):
+        return "breakeven-stop"
+    if direction == SignalDirection.LONG and stop_price > entry_price:
+        return "profit-protect-stop"
+    if direction == SignalDirection.SHORT and stop_price < entry_price:
+        return "profit-protect-stop"
+    return "stop-loss"
 
 
 def _exit_commission_from_item(item: dict[str, object], trade: TradeRecord) -> float:

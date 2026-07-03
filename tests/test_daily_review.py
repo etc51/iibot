@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from samosbor.autonomy.daily_review import build_daily_review_payload, daily_review_path, write_daily_review
+from samosbor.autonomy.daily_review import _simulate_plan, build_daily_review_payload, daily_review_path, write_daily_review
 from samosbor.config import (
     AppConfig,
     AppSection,
@@ -152,3 +153,39 @@ def test_daily_review_reviews_actual_trade_and_writes_files(tmp_path: Path):
     assert str(daily_review_path(Path("state/paper_state.json"))).replace("\\", "/") == (
         "state/paper_state_daily_review.json"
     )
+
+
+def test_daily_review_simulates_runner_after_take_profit_touch():
+    start = datetime(2026, 7, 3, 6, 0, tzinfo=timezone.utc)
+    candles = [
+        Candle(start, open=100.0, high=100.5, low=99.5, close=100.0, volume=1_000_000),
+        Candle(start + timedelta(minutes=15), open=100.0, high=106.0, low=100.2, close=105.0, volume=1_000_000),
+        Candle(start + timedelta(minutes=30), open=105.0, high=105.2, low=102.0, close=103.0, volume=1_000_000),
+    ]
+
+    plan = _simulate_plan(
+        direction=SignalDirection.LONG,
+        candles=candles,
+        entry_index=0,
+        entry_offset_bars=0,
+        entry_price=100.0,
+        base_atr=2.0,
+        stop_multiple=1.0,
+        reward_to_risk=2.0,
+        lot_size=1,
+        slippage_bps=0.0,
+        commission_bps=0.0,
+        max_holding_bars=3,
+        end_at=start + timedelta(days=1),
+        timezone_info=ZoneInfo("Europe/Moscow"),
+        runner_enabled=True,
+        runner_breakeven_buffer_bps=10.0,
+        runner_trailing_atr_multiple=1.3,
+        runner_profit_lock_ratio=0.35,
+        runner_atr_window=14,
+    )
+
+    assert plan["runner_activated"] is True
+    assert plan["exit_reason"] == "profit-protect-stop"
+    assert plan["exit_price"] > 100.0
+    assert plan["final_stop_price"] > 100.0

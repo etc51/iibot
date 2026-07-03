@@ -104,6 +104,10 @@ class Position:
     entry_metadata: dict[str, Any] = field(default_factory=dict)
     initial_stop_price: float = 0.0
     initial_take_profit: float = 0.0
+    runner_active: bool = False
+    runner_activated_at: datetime | None = None
+    runner_activation_price: float = 0.0
+    runner_extreme_price: float = 0.0
 
     @property
     def quantity_units(self) -> int:
@@ -161,6 +165,12 @@ class Position:
             "entry_metadata": self.entry_metadata,
             "initial_stop_price": self.initial_stop_price,
             "initial_take_profit": self.initial_take_profit,
+            "runner_active": self.runner_active,
+            "runner_activated_at": (
+                self.runner_activated_at.isoformat() if self.runner_activated_at is not None else None
+            ),
+            "runner_activation_price": self.runner_activation_price,
+            "runner_extreme_price": self.runner_extreme_price,
         }
 
     @classmethod
@@ -197,6 +207,14 @@ class Position:
             entry_metadata=dict(payload.get("entry_metadata", {})),
             initial_stop_price=float(payload.get("initial_stop_price", payload["stop_price"])),
             initial_take_profit=float(payload.get("initial_take_profit", payload["take_profit"])),
+            runner_active=bool(payload.get("runner_active", False)),
+            runner_activated_at=(
+                datetime.fromisoformat(payload["runner_activated_at"])
+                if payload.get("runner_activated_at")
+                else None
+            ),
+            runner_activation_price=float(payload.get("runner_activation_price", 0.0)),
+            runner_extreme_price=float(payload.get("runner_extreme_price", 0.0)),
         )
 
 

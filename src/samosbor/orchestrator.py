@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from .analysis.indicators import atr
 from .autonomy.entry_schedule import (
     build_entry_schedule_tuning_payload,
     write_entry_schedule_tuning,
@@ -15,6 +16,7 @@ from .autonomy.adaptive_entry import (
     adaptive_entry_block_reason,
     build_adaptive_entry_context,
 )
+from .autonomy.runner import runner_breakeven_stop, runner_extreme_price
 from .autonomy.entry_confirmation import build_entry_confirmation_context
 from .autonomy.entry_quality_tuning import (
     build_entry_quality_tuning_payload,
@@ -1051,14 +1053,25 @@ class TradingOrchestrator:
                             reason=ExitReason.STOP_LOSS,
                         )
                         position = None
-                    elif latest.high >= position.take_profit:
-                        broker.close_position(
+                    elif latest.high >= position.take_profit and not position.runner_active:
+                        if self._take_profit_activates_runner(
+                            broker,
                             instrument.symbol,
-                            price=position.take_profit,
-                            timestamp=latest.timestamp,
-                            reason=ExitReason.TAKE_PROFIT,
-                        )
-                        position = None
+                            position,
+                            latest,
+                        ):
+                            position = broker.portfolio.positions.get(instrument.symbol)
+                        else:
+                            broker.close_position(
+                                instrument.symbol,
+                                price=position.take_profit,
+                                timestamp=latest.timestamp,
+                                reason=ExitReason.TAKE_PROFIT,
+                            )
+                            position = None
+                    elif position.runner_active:
+                        self._update_runner_extreme(broker, instrument.symbol, position, latest)
+                        position = broker.portfolio.positions.get(instrument.symbol)
                 else:
                     if latest.high >= position.stop_price:
                         broker.close_position(
@@ -1068,14 +1081,25 @@ class TradingOrchestrator:
                             reason=ExitReason.STOP_LOSS,
                         )
                         position = None
-                    elif latest.low <= position.take_profit:
-                        broker.close_position(
+                    elif latest.low <= position.take_profit and not position.runner_active:
+                        if self._take_profit_activates_runner(
+                            broker,
                             instrument.symbol,
-                            price=position.take_profit,
-                            timestamp=latest.timestamp,
-                            reason=ExitReason.TAKE_PROFIT,
-                        )
-                        position = None
+                            position,
+                            latest,
+                        ):
+                            position = broker.portfolio.positions.get(instrument.symbol)
+                        else:
+                            broker.close_position(
+                                instrument.symbol,
+                                price=position.take_profit,
+                                timestamp=latest.timestamp,
+                                reason=ExitReason.TAKE_PROFIT,
+                            )
+                            position = None
+                    elif position.runner_active:
+                        self._update_runner_extreme(broker, instrument.symbol, position, latest)
+                        position = broker.portfolio.positions.get(instrument.symbol)
                 if position is not None and strategy.should_force_flatten_at(latest.timestamp):
                     broker.close_position(
                         instrument.symbol,
@@ -1085,17 +1109,29 @@ class TradingOrchestrator:
                     )
                     position = None
                 if position is not None:
-                    new_stop = risk_manager.trailing_stop_price(
-                        position,
-                        latest.close,
-                        self.config.strategy,
-                    )
+                    if position.runner_active:
+                        new_stop = risk_manager.runner_trailing_stop_price(
+                            position,
+                            atr_value=atr(candles, self.config.strategy.atr_window),
+                            strategy=self.config.strategy,
+                        )
+                    else:
+                        new_stop = risk_manager.trailing_stop_price(
+                            position,
+                            latest.close,
+                            self.config.strategy,
+                        )
                     if new_stop is not None:
+                        reason = (
+                            "runner-trailing-profit-protection"
+                            if position.runner_active
+                            else "trailing-profit-protection"
+                        )
                         broker.update_position_protection(
                             instrument.symbol,
                             timestamp=latest.timestamp,
                             stop_price=new_stop,
-                            reason="trailing-profit-protection",
+                            reason=reason,
                         )
 
             signal = strategy.generate_signal(instrument, candles)
@@ -1133,6 +1169,7 @@ class TradingOrchestrator:
                         horizon_bars=default_signal_horizon_bars(self.config.data.timeframe),
                         slippage_bps=self.config.execution.slippage_bps,
                         commission_bps=self.config.execution.commission_bps,
+                        **self._signal_feedback_runner_kwargs(),
                     )
                 continue
 
@@ -1154,6 +1191,7 @@ class TradingOrchestrator:
                         horizon_bars=default_signal_horizon_bars(self.config.data.timeframe),
                         slippage_bps=self.config.execution.slippage_bps,
                         commission_bps=self.config.execution.commission_bps,
+                        **self._signal_feedback_runner_kwargs(),
                     )
                 entry_block_reason = strategy.entry_block_reason_for_instrument(
                     instrument,
@@ -1385,6 +1423,43 @@ class TradingOrchestrator:
         )
         return replace(signal, metadata=metadata)
 
+    def _take_profit_activates_runner(self, broker, symbol: str, position, candle) -> bool:
+        if not self.config.strategy.take_profit_activates_runner:
+            return False
+        stop_price = runner_breakeven_stop(
+            direction=position.direction,
+            entry_price=position.entry_price,
+            buffer_bps=self.config.strategy.runner_breakeven_buffer_bps,
+        )
+        extreme_price = runner_extreme_price(
+            direction=position.direction,
+            current_extreme=position.runner_extreme_price,
+            candle=candle,
+            activation_price=position.take_profit,
+        )
+        return broker.activate_position_runner(
+            symbol,
+            timestamp=candle.timestamp,
+            activation_price=position.take_profit,
+            stop_price=stop_price,
+            extreme_price=extreme_price,
+        )
+
+    def _update_runner_extreme(self, broker, symbol: str, position, candle) -> None:
+        if not position.runner_active:
+            return
+        extreme_price = runner_extreme_price(
+            direction=position.direction,
+            current_extreme=position.runner_extreme_price,
+            candle=candle,
+            activation_price=position.runner_activation_price or position.take_profit,
+        )
+        broker.update_position_runner_extreme(
+            symbol,
+            timestamp=candle.timestamp,
+            extreme_price=extreme_price,
+        )
+
     def _record_blocked_signal_feedback(
         self,
         feedback_payload,
@@ -1408,7 +1483,18 @@ class TradingOrchestrator:
             quantity_lots=max(1, int(quantity_lots or 1)),
             slippage_bps=self.config.execution.slippage_bps,
             commission_bps=self.config.execution.commission_bps,
+            **self._signal_feedback_runner_kwargs(),
         )
+
+    def _signal_feedback_runner_kwargs(self) -> dict[str, object]:
+        strategy = self.config.strategy
+        return {
+            "runner_enabled": strategy.take_profit_activates_runner,
+            "runner_breakeven_buffer_bps": strategy.runner_breakeven_buffer_bps,
+            "runner_trailing_atr_multiple": strategy.runner_trailing_atr_multiple,
+            "runner_profit_lock_ratio": strategy.runner_profit_lock_ratio,
+            "runner_atr_window": strategy.atr_window,
+        }
 
     def _apply_learning_size_adjustment(self, signal, decision):
         metadata = dict(signal.metadata)

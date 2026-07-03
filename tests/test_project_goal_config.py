@@ -29,6 +29,10 @@ def test_focused_runtime_matches_project_goal():
     assert config.strategy.alternative_plan_entry_offset_bars == 2
     assert config.strategy.alternative_plan_atr_stop_multiple == 1.0
     assert config.strategy.alternative_plan_reward_to_risk == 2.0
+    assert config.strategy.take_profit_activates_runner is True
+    assert config.strategy.runner_breakeven_buffer_bps == 10.0
+    assert config.strategy.runner_trailing_atr_multiple == 1.3
+    assert config.strategy.runner_profit_lock_ratio == 0.35
     assert config.backtest.initial_cash == 300_000
     assert effective_target_daily_profit_rub(config.research, config.backtest) == 2_000.0
     assert effective_target_monthly_profit_rub(config.research, config.backtest) == 40_000.0

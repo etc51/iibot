@@ -139,6 +139,37 @@ class PaperBrokerTest(unittest.TestCase):
         self.assertEqual(broker.events[-1]["reason"], "trailing-profit-protection")
         self.assertEqual(broker.events[-1]["stop_price"], 103.0)
 
+    def test_activate_position_runner_moves_stop_and_records_event(self):
+        broker = LocalPaperBroker.fresh(100_000, slippage_bps=0, commission_bps=0)
+        instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=10)
+        signal = Signal(
+            instrument=instrument,
+            direction=SignalDirection.LONG,
+            strength=0.8,
+            entry_price=100.0,
+            stop_price=95.0,
+            take_profit=104.0,
+            reason="test",
+        )
+
+        broker.open_position(signal, 1, datetime(2025, 1, 1, tzinfo=timezone.utc))
+        activated = broker.activate_position_runner(
+            "SBER",
+            timestamp=datetime(2025, 1, 1, 1, 0, tzinfo=timezone.utc),
+            activation_price=104.0,
+            stop_price=100.1,
+            extreme_price=106.0,
+        )
+
+        position = broker.portfolio.positions["SBER"]
+        self.assertTrue(activated)
+        self.assertTrue(position.runner_active)
+        self.assertEqual(position.stop_price, 100.1)
+        self.assertEqual(position.runner_activation_price, 104.0)
+        self.assertEqual(position.runner_extreme_price, 106.0)
+        self.assertEqual(broker.events[-1]["action"], "runner-activate")
+        self.assertEqual(broker.events[-1]["reason"], "take-profit-runner-activation")
+
 
 if __name__ == "__main__":
     unittest.main()

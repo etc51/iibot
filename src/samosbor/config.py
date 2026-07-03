@@ -69,6 +69,10 @@ class StrategySection:
     breakeven_trigger_pct: float = 0.0
     trailing_profit_trigger_rub: float = 0.0
     trailing_profit_lock_ratio: float = 0.0
+    take_profit_activates_runner: bool = False
+    runner_breakeven_buffer_bps: float = 10.0
+    runner_trailing_atr_multiple: float = 1.3
+    runner_profit_lock_ratio: float = 0.35
     min_signal_strength: float = 0.0
     min_trend_strength: float = 0.004
     min_liquidity_rub: float = 50_000_000

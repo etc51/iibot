@@ -320,6 +320,10 @@ def _positions_from_state(
                 "price_source": price_source,
                 "stop_price": float(position.get("stop_price", 0.0)),
                 "take_profit": float(position.get("take_profit", 0.0)),
+                "runner_active": bool(position.get("runner_active", False)),
+                "runner_status": "runner" if bool(position.get("runner_active", False)) else "fixed-tp",
+                "runner_activation_price": float(position.get("runner_activation_price", 0.0)),
+                "runner_extreme_price": float(position.get("runner_extreme_price", 0.0)),
                 "unrealized_pnl_rub": round(pnl, 2),
                 "signal_strength": float(position.get("signal_strength", 0.0)),
                 "opened_at": str(position.get("opened_at", "")),
@@ -342,13 +346,14 @@ def _positions_table(rows: list[dict[str, object]]) -> str:
         f"<td class=\"{_tone(float(row['unrealized_pnl_rub']))}\">{_money(row['unrealized_pnl_rub'])}</td>"
         f"<td>{float(row['stop_price']):.4f}</td>"
         f"<td>{float(row['take_profit']):.4f}</td>"
+        f"<td>{_escape(str(row['runner_status']))}</td>"
         f"<td>{float(row['signal_strength']):.2f}</td>"
         "</tr>"
         for row in rows
     )
     return (
         "<table><tr><th>Symbol</th><th>Dir</th><th>Lots</th><th>Entry</th><th>Now</th><th>Src</th>"
-        "<th>PnL</th><th>Stop</th><th>Take</th><th>Signal</th></tr>"
+        "<th>PnL</th><th>Stop</th><th>Take</th><th>Runner</th><th>Signal</th></tr>"
         f"{body}</table>"
     )
 

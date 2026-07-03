@@ -9,6 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..analysis.indicators import atr
+from ..autonomy.runner import runner_breakeven_stop, runner_extreme_price, runner_trailing_stop
 from ..config import AppConfig
 from ..domain import Candle, Instrument, PortfolioState, Signal, SignalDirection, TradeRecord
 from ..strategy.trend_following import TrendFollowingStrategy
@@ -364,6 +365,11 @@ def _best_plan_for_signal(
                         max_holding_bars=max_holding_bars,
                         end_at=end_at,
                         timezone_info=timezone_info,
+                        runner_enabled=config.strategy.take_profit_activates_runner,
+                        runner_breakeven_buffer_bps=config.strategy.runner_breakeven_buffer_bps,
+                        runner_trailing_atr_multiple=config.strategy.runner_trailing_atr_multiple,
+                        runner_profit_lock_ratio=config.strategy.runner_profit_lock_ratio,
+                        runner_atr_window=config.strategy.atr_window,
                     )
                 )
     if not plans:
@@ -441,6 +447,11 @@ def _review_actual_trade(
                         end_at=end_at,
                         timezone_info=timezone_info,
                         quantity_lots=max(1, trade.quantity_lots),
+                        runner_enabled=config.strategy.take_profit_activates_runner,
+                        runner_breakeven_buffer_bps=config.strategy.runner_breakeven_buffer_bps,
+                        runner_trailing_atr_multiple=config.strategy.runner_trailing_atr_multiple,
+                        runner_profit_lock_ratio=config.strategy.runner_profit_lock_ratio,
+                        runner_atr_window=config.strategy.atr_window,
                     )
                 )
     if not plans:
@@ -473,6 +484,11 @@ def _simulate_plan(
     end_at: datetime,
     timezone_info: ZoneInfo,
     quantity_lots: int = 1,
+    runner_enabled: bool = False,
+    runner_breakeven_buffer_bps: float = 0.0,
+    runner_trailing_atr_multiple: float = 0.0,
+    runner_profit_lock_ratio: float = 0.0,
+    runner_atr_window: int = 14,
 ) -> dict[str, object]:
     distance = max(1e-9, base_atr * stop_multiple)
     if direction == SignalDirection.LONG:
@@ -482,10 +498,15 @@ def _simulate_plan(
         stop_price = entry_price + distance
         take_profit = entry_price - distance * reward_to_risk
 
+    initial_stop_price = stop_price
     exit_price = candles[entry_index].close
     exit_time = candles[entry_index].timestamp
     exit_reason = "no-future-candle"
     exit_index = entry_index
+    runner_active = False
+    runner_activated_at = ""
+    runner_activation_price = 0.0
+    runner_extreme = 0.0
     end_index = min(len(candles) - 1, entry_index + max(1, max_holding_bars))
     for index in range(entry_index + 1, end_index + 1):
         candle = candles[index]
@@ -496,21 +517,72 @@ def _simulate_plan(
         if direction == SignalDirection.LONG:
             if candle.low <= stop_price:
                 exit_price = stop_price
-                exit_reason = "stop-loss"
+                exit_reason = _simulated_stop_reason(direction, entry_price, stop_price)
                 break
-            if candle.high >= take_profit:
-                exit_price = take_profit
-                exit_reason = "take-profit"
-                break
+            if candle.high >= take_profit and not runner_active:
+                if runner_enabled:
+                    runner_active = True
+                    runner_activated_at = candle.timestamp.isoformat()
+                    runner_activation_price = take_profit
+                    runner_extreme = runner_extreme_price(
+                        direction=direction,
+                        current_extreme=runner_extreme,
+                        candle=candle,
+                        activation_price=take_profit,
+                    )
+                    stop_price = runner_breakeven_stop(
+                        direction=direction,
+                        entry_price=entry_price,
+                        buffer_bps=runner_breakeven_buffer_bps,
+                    )
+                else:
+                    exit_price = take_profit
+                    exit_reason = "take-profit"
+                    break
         else:
             if candle.high >= stop_price:
                 exit_price = stop_price
-                exit_reason = "stop-loss"
+                exit_reason = _simulated_stop_reason(direction, entry_price, stop_price)
                 break
-            if candle.low <= take_profit:
-                exit_price = take_profit
-                exit_reason = "take-profit"
-                break
+            if candle.low <= take_profit and not runner_active:
+                if runner_enabled:
+                    runner_active = True
+                    runner_activated_at = candle.timestamp.isoformat()
+                    runner_activation_price = take_profit
+                    runner_extreme = runner_extreme_price(
+                        direction=direction,
+                        current_extreme=runner_extreme,
+                        candle=candle,
+                        activation_price=take_profit,
+                    )
+                    stop_price = runner_breakeven_stop(
+                        direction=direction,
+                        entry_price=entry_price,
+                        buffer_bps=runner_breakeven_buffer_bps,
+                    )
+                else:
+                    exit_price = take_profit
+                    exit_reason = "take-profit"
+                    break
+        if runner_active:
+            runner_extreme = runner_extreme_price(
+                direction=direction,
+                current_extreme=runner_extreme,
+                candle=candle,
+                activation_price=runner_activation_price or take_profit,
+            )
+            new_stop = runner_trailing_stop(
+                direction=direction,
+                entry_price=entry_price,
+                current_stop=stop_price,
+                extreme_price=runner_extreme,
+                atr_value=atr(candles[: index + 1], runner_atr_window),
+                atr_multiple=runner_trailing_atr_multiple,
+                lock_ratio=runner_profit_lock_ratio,
+                breakeven_buffer_bps=runner_breakeven_buffer_bps,
+            )
+            if new_stop is not None:
+                stop_price = new_stop
         exit_price = candle.close
         exit_reason = "time-exit"
 
@@ -532,15 +604,30 @@ def _simulate_plan(
         "exit_time": exit_time.isoformat(),
         "entry_price": round(entry_price, 6),
         "exit_price": round(exit_price, 6),
-        "stop_price": round(stop_price, 6),
+        "stop_price": round(initial_stop_price, 6),
+        "final_stop_price": round(stop_price, 6),
         "take_profit": round(take_profit, 6),
         "stop_multiple": round(stop_multiple, 4),
         "reward_to_risk": round(reward_to_risk, 4),
+        "runner_enabled": bool(runner_enabled),
+        "runner_activated": runner_active or bool(runner_activated_at),
+        "runner_activated_at": runner_activated_at,
+        "runner_extreme_price": round(runner_extreme, 6),
         "exit_reason": exit_reason,
         "gross_pnl_per_lot_rub": round(gross / max(1, quantity_lots), 2),
         "net_pnl_per_lot_rub": round(net / max(1, quantity_lots), 2),
         "realized_r_net": round((net / max(1, quantity_lots)) / risk_per_lot, 4) if risk_per_lot > 0 else 0.0,
     }
+
+
+def _simulated_stop_reason(direction: SignalDirection, entry_price: float, stop_price: float) -> str:
+    if math.isclose(stop_price, entry_price, rel_tol=1e-9, abs_tol=1e-9):
+        return "breakeven-stop"
+    if direction == SignalDirection.LONG and stop_price > entry_price:
+        return "profit-protect-stop"
+    if direction == SignalDirection.SHORT and stop_price < entry_price:
+        return "profit-protect-stop"
+    return "stop-loss"
 
 
 def _hypothetical_pnl(

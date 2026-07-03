@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from datetime import datetime
 
+from ..analysis.indicators import atr
+from ..autonomy.runner import runner_breakeven_stop, runner_extreme_price
 from ..config import BacktestSection
 from ..domain import BacktestResult, Candle, EquityPoint, ExitReason, SignalDirection
 from ..execution.paper import LocalPaperBroker
@@ -67,10 +69,9 @@ class BacktestEngine:
                 position = broker.portfolio.positions.get(symbol)
                 if position is not None:
                     exit_price, reason = self._check_exit(
-                        position.direction,
-                        position.entry_price,
-                        position.stop_price,
-                        position.take_profit,
+                        broker,
+                        symbol,
+                        position,
                         candle,
                     )
                     if reason is not None:
@@ -94,6 +95,7 @@ class BacktestEngine:
                         broker=broker,
                         symbol=symbol,
                         position=position,
+                        history=history,
                         mark_price=candle.close,
                         timestamp=timestamp,
                     )
@@ -191,6 +193,7 @@ class BacktestEngine:
         broker: LocalPaperBroker,
         symbol: str,
         position,
+        history: list[Candle],
         mark_price: float,
         timestamp,
     ) -> None:
@@ -198,7 +201,16 @@ class BacktestEngine:
         if strategy_config is None:
             return
 
-        new_stop = self.risk_manager.trailing_stop_price(position, mark_price, strategy_config)
+        if position.runner_active:
+            new_stop = self.risk_manager.runner_trailing_stop_price(
+                position,
+                atr_value=atr(history, strategy_config.atr_window),
+                strategy=strategy_config,
+            )
+            reason = "runner-trailing-profit-protection"
+        else:
+            new_stop = self.risk_manager.trailing_stop_price(position, mark_price, strategy_config)
+            reason = "trailing-profit-protection"
         if new_stop is None:
             return
 
@@ -206,17 +218,20 @@ class BacktestEngine:
             symbol,
             timestamp=timestamp,
             stop_price=new_stop,
-            reason="trailing-profit-protection",
+            reason=reason,
         )
 
-    @staticmethod
     def _check_exit(
-        direction: SignalDirection,
-        entry_price: float,
-        stop_price: float,
-        take_profit: float,
+        self,
+        broker: LocalPaperBroker,
+        symbol: str,
+        position,
         candle: Candle,
     ):
+        direction = position.direction
+        entry_price = position.entry_price
+        stop_price = position.stop_price
+        take_profit = position.take_profit
         if direction == SignalDirection.LONG:
             if candle.low <= stop_price:
                 return stop_price, BacktestEngine._stop_exit_reason(
@@ -224,7 +239,9 @@ class BacktestEngine:
                     entry_price,
                     stop_price,
                 )
-            if candle.high >= take_profit:
+            if candle.high >= take_profit and not position.runner_active:
+                if self._activate_runner_if_configured(broker, symbol, position, candle):
+                    return None, None
                 return take_profit, ExitReason.TAKE_PROFIT
         else:
             if candle.high >= stop_price:
@@ -233,9 +250,61 @@ class BacktestEngine:
                     entry_price,
                     stop_price,
                 )
-            if candle.low <= take_profit:
+            if candle.low <= take_profit and not position.runner_active:
+                if self._activate_runner_if_configured(broker, symbol, position, candle):
+                    return None, None
                 return take_profit, ExitReason.TAKE_PROFIT
+        if position.runner_active:
+            self._update_runner_extreme(broker, symbol, position, candle)
         return None, None
+
+    def _activate_runner_if_configured(
+        self,
+        broker: LocalPaperBroker,
+        symbol: str,
+        position,
+        candle: Candle,
+    ) -> bool:
+        strategy_config = getattr(self.strategy, "config", None)
+        if strategy_config is None or not strategy_config.take_profit_activates_runner:
+            return False
+        stop_price = runner_breakeven_stop(
+            direction=position.direction,
+            entry_price=position.entry_price,
+            buffer_bps=strategy_config.runner_breakeven_buffer_bps,
+        )
+        extreme_price = runner_extreme_price(
+            direction=position.direction,
+            current_extreme=position.runner_extreme_price,
+            candle=candle,
+            activation_price=position.take_profit,
+        )
+        return broker.activate_position_runner(
+            symbol,
+            timestamp=candle.timestamp,
+            activation_price=position.take_profit,
+            stop_price=stop_price,
+            extreme_price=extreme_price,
+        )
+
+    @staticmethod
+    def _update_runner_extreme(
+        broker: LocalPaperBroker,
+        symbol: str,
+        position,
+        candle: Candle,
+    ) -> None:
+        extreme_price = runner_extreme_price(
+            direction=position.direction,
+            current_extreme=position.runner_extreme_price,
+            candle=candle,
+            activation_price=position.runner_activation_price or position.take_profit,
+        )
+        broker.update_position_runner_extreme(
+            symbol,
+            timestamp=candle.timestamp,
+            extreme_price=extreme_price,
+        )
 
     @staticmethod
     def _stop_exit_reason(

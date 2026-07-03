@@ -225,6 +225,55 @@ class SignalFeedbackTest(unittest.TestCase):
         self.assertAlmostEqual(payload["resolved"][0]["entry_commission"], 0.4, places=6)
         self.assertAlmostEqual(payload["resolved"][0]["exit_commission"], 0.4, places=6)
 
+    def test_shadow_signal_take_profit_can_activate_runner(self):
+        payload = {"pending": [], "resolved": []}
+        signal = Signal(
+            instrument=Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1),
+            direction=SignalDirection.LONG,
+            strength=0.8,
+            entry_price=100.0,
+            stop_price=95.0,
+            take_profit=104.0,
+            reason="runner-check",
+        )
+        opened_at = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+        record_shadow_signal(
+            payload,
+            signal,
+            timestamp=opened_at,
+            horizon_bars=3,
+            runner_enabled=True,
+            runner_breakeven_buffer_bps=10.0,
+            runner_trailing_atr_multiple=1.3,
+            runner_profit_lock_ratio=0.35,
+        )
+        candles = [
+            Candle(
+                timestamp=opened_at + timedelta(hours=1),
+                open=100.0,
+                high=106.0,
+                low=100.2,
+                close=105.0,
+                volume=1_000_000,
+            ),
+            Candle(
+                timestamp=opened_at + timedelta(hours=2),
+                open=105.0,
+                high=105.2,
+                low=102.0,
+                close=103.0,
+                volume=1_000_000,
+            ),
+        ]
+
+        resolve_pending_signals(payload, {"SBER": candles})
+        trades = resolved_feedback_to_trades(payload)
+
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0].reason, "profit-protect-stop")
+        self.assertTrue(payload["resolved"][0]["runner_activated"])
+        self.assertGreater(payload["resolved"][0]["final_stop_price"], 100.0)
+
     def test_save_and_load_round_trip(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "signal_feedback.json"

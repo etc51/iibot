@@ -24,6 +24,9 @@ def _portfolio() -> dict[str, object]:
                 "current_price": 1301.6,
                 "stop_price": 1306.8,
                 "take_profit": 1288.5,
+                "runner_active": True,
+                "runner_activation_price": 1288.5,
+                "runner_extreme_price": 1284.0,
                 "signal_strength": 0.25,
                 "opened_at": "2026-07-01T14:30:00+00:00",
             }
@@ -39,6 +42,8 @@ def test_open_position_uses_live_price_when_available():
     assert positions[0]["price_source"] == "live"
     assert positions[0]["quantity_units"] == 35
     assert positions[0]["unrealized_pnl_rub"] == 387.79
+    assert positions[0]["runner_status"] == "runner"
+    assert positions[0]["runner_extreme_price"] == 1284.0
 
 
 def test_open_position_falls_back_to_state_price():

@@ -180,6 +180,14 @@ class _AdaptationPaperCycleOrchestrator(_PaperCycleOrchestrator):
         return _AlwaysSignalAdaptationStrategy()
 
 
+class _NoSignalPaperCycleOrchestrator(_PaperCycleOrchestrator):
+    def _strategy(self):
+        return _NoSignalStrategy()
+
+    def _adaptation_strategy(self):
+        return _NoSignalStrategy()
+
+
 def _wide_early_short_candles() -> list[Candle]:
     start = datetime(2025, 1, 1, 6, 0, tzinfo=timezone.utc)
     candles = [
@@ -402,6 +410,108 @@ class PaperCycleTrailingProtectionTest(unittest.TestCase):
             self.assertEqual(protect_events[0]["timestamp"], latest_candle.timestamp.isoformat())
             self.assertEqual(protect_events[0]["reason"], "trailing-profit-protection")
             self.assertEqual(protect_events[0]["stop_price"], 103.0)
+
+    def test_paper_cycle_take_profit_activates_runner_instead_of_closing(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_dir = root / "configs"
+            config_dir.mkdir(parents=True)
+            config_path = config_dir / "paper.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[app]",
+                        'timezone = "Europe/Moscow"',
+                        "",
+                        "[data]",
+                        'source = "csv"',
+                        'csv_path = "data/demo.csv"',
+                        'timeframe = "30min"',
+                        "",
+                        "[[data.instruments]]",
+                        'symbol = "SBER"',
+                        'instrument_type = "stock"',
+                        "lot_size = 1",
+                        "",
+                        "[strategy]",
+                        "min_liquidity_rub = 1.0",
+                        "take_profit_activates_runner = true",
+                        "runner_breakeven_buffer_bps = 10.0",
+                        "runner_trailing_atr_multiple = 1.3",
+                        "runner_profit_lock_ratio = 0.35",
+                        "",
+                        "[execution]",
+                        'mode = "local-paper"',
+                        "allow_live_trading = false",
+                        'state_path = "state/paper_state.json"',
+                        "",
+                        "[backtest]",
+                        "initial_cash = 100000",
+                        "",
+                        "[reporting]",
+                        'output_dir = "runs"',
+                        "",
+                        "[research]",
+                        "",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            state_path = config.resolve_path(config.execution.state_path)
+            broker = LocalPaperBroker.fresh(100_000, slippage_bps=0, commission_bps=0)
+            broker.open_position(
+                Signal(
+                    instrument=instrument,
+                    direction=SignalDirection.LONG,
+                    strength=0.8,
+                    entry_price=100.0,
+                    stop_price=95.0,
+                    take_profit=104.0,
+                    reason="bootstrap-position",
+                ),
+                10,
+                datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc),
+            )
+            broker.save(state_path)
+
+            latest_candle = Candle(
+                timestamp=datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc),
+                open=100.0,
+                high=106.0,
+                low=100.2,
+                close=105.0,
+                volume=5_000_000,
+            )
+            orchestrator = _NoSignalPaperCycleOrchestrator(
+                config,
+                _FakeProvider([instrument], {"SBER": [latest_candle]}),
+            )
+
+            orchestrator.run_paper_cycle()
+            reloaded = LocalPaperBroker.load(
+                state_path,
+                initial_cash=config.backtest.initial_cash,
+                slippage_bps=config.execution.slippage_bps,
+                commission_bps=config.execution.commission_bps,
+            )
+
+            self.assertEqual(len(reloaded.trades), 0)
+            position = reloaded.portfolio.positions["SBER"]
+            self.assertTrue(position.runner_active)
+            self.assertEqual(position.runner_activation_price, 104.0)
+            self.assertEqual(position.runner_extreme_price, 106.0)
+            self.assertGreater(position.stop_price, 100.0)
+            self.assertNotEqual(position.stop_price, 95.0)
+
+            runner_events = [event for event in reloaded.events if event.get("action") == "runner-activate"]
+            protect_events = [event for event in reloaded.events if event.get("action") == "protect"]
+            self.assertEqual(len(runner_events), 1)
+            self.assertEqual(len(protect_events), 1)
+            self.assertEqual(protect_events[0]["reason"], "runner-trailing-profit-protection")
 
 
 class PaperCycleSignalDiagnosticsTest(unittest.TestCase):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from statistics import mean
 
+from ..autonomy.runner import position_runner_trailing_stop
 from ..config import RiskSection, StrategySection
 from ..domain import (
     InstrumentType,
@@ -239,6 +240,21 @@ class RiskManager:
         if position.direction == SignalDirection.LONG:
             return max(candidates)
         return min(candidates)
+
+    def runner_trailing_stop_price(
+        self,
+        position: Position,
+        *,
+        atr_value: float | None,
+        strategy: StrategySection,
+    ) -> float | None:
+        return position_runner_trailing_stop(
+            position,
+            atr_value=atr_value,
+            atr_multiple=max(0.0, strategy.runner_trailing_atr_multiple),
+            lock_ratio=max(0.0, min(1.0, strategy.runner_profit_lock_ratio)),
+            breakeven_buffer_bps=max(0.0, strategy.runner_breakeven_buffer_bps),
+        )
 
     def _dynamic_risk_fraction(self, recent_trades: list[TradeRecord]) -> float:
         if len(recent_trades) < self.config.min_trades_for_kelly:

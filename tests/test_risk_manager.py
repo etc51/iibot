@@ -220,6 +220,38 @@ class RiskManagerDiversificationTest(unittest.TestCase):
 
         self.assertEqual(candidate, 101.0)
 
+    def test_runner_trailing_stop_uses_atr_and_profit_lock_after_take_profit_activation(self):
+        manager = RiskManager(RiskSection())
+        now = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        position = Position(
+            instrument=Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1),
+            direction=SignalDirection.LONG,
+            quantity_lots=10,
+            entry_price=100.0,
+            entry_commission=0.0,
+            margin_requirement=0.0,
+            current_price=106.0,
+            stop_price=100.1,
+            take_profit=104.0,
+            opened_at=now,
+            updated_at=now,
+            runner_active=True,
+            runner_activation_price=104.0,
+            runner_extreme_price=106.0,
+        )
+
+        candidate = manager.runner_trailing_stop_price(
+            position,
+            atr_value=2.0,
+            strategy=StrategySection(
+                runner_breakeven_buffer_bps=10.0,
+                runner_trailing_atr_multiple=1.3,
+                runner_profit_lock_ratio=0.35,
+            ),
+        )
+
+        self.assertAlmostEqual(candidate, 103.4)
+
 
 if __name__ == "__main__":
     unittest.main()

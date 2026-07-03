@@ -303,6 +303,58 @@ class LocalPaperBroker:
         )
         return True
 
+    def activate_position_runner(
+        self,
+        symbol: str,
+        *,
+        timestamp: datetime,
+        activation_price: float,
+        stop_price: float,
+        extreme_price: float,
+        reason: str = "take-profit-runner-activation",
+    ) -> bool:
+        position = self.portfolio.positions.get(symbol)
+        if position is None or position.runner_active:
+            return False
+
+        position.runner_active = True
+        position.runner_activated_at = timestamp
+        position.runner_activation_price = activation_price
+        position.runner_extreme_price = extreme_price
+        position.stop_price = stop_price
+        position.updated_at = timestamp
+        self.events.append(
+            {
+                "timestamp": timestamp.isoformat(),
+                "symbol": symbol,
+                "action": "runner-activate",
+                "direction": position.direction.value,
+                "activation_price": activation_price,
+                "stop_price": stop_price,
+                "take_profit": position.take_profit,
+                "runner_extreme_price": position.runner_extreme_price,
+                "reason": reason,
+            }
+        )
+        return True
+
+    def update_position_runner_extreme(
+        self,
+        symbol: str,
+        *,
+        timestamp: datetime,
+        extreme_price: float,
+    ) -> bool:
+        position = self.portfolio.positions.get(symbol)
+        if position is None or not position.runner_active:
+            return False
+        if extreme_price == position.runner_extreme_price:
+            return False
+
+        position.runner_extreme_price = extreme_price
+        position.updated_at = timestamp
+        return True
+
     def _slipped_price(self, price: float, *, is_buy: bool) -> float:
         factor = 1 + (self.slippage_bps / 10_000)
         return price * factor if is_buy else price / factor

@@ -259,6 +259,83 @@ class BacktestSmokeTest(unittest.TestCase):
         self.assertEqual(result.trades[0].reason, ExitReason.BREAKEVEN_STOP.value)
         self.assertEqual(result.trades[0].exit_price, 100.0)
 
+    def test_backtest_take_profit_can_activate_runner_instead_of_closing(self):
+        instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+        candles = [
+            Candle(
+                timestamp=datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc),
+                open=100.0,
+                high=100.5,
+                low=99.5,
+                close=100.0,
+                volume=2_000_000,
+            ),
+            Candle(
+                timestamp=datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc),
+                open=100.0,
+                high=106.0,
+                low=100.2,
+                close=105.0,
+                volume=2_100_000,
+            ),
+            Candle(
+                timestamp=datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc),
+                open=105.0,
+                high=105.2,
+                low=102.0,
+                close=103.0,
+                volume=2_100_000,
+            ),
+        ]
+
+        class FakeRunnerStrategy:
+            def __init__(self):
+                self.config = StrategySection(
+                    take_profit_activates_runner=True,
+                    runner_breakeven_buffer_bps=10.0,
+                    runner_trailing_atr_multiple=1.3,
+                    runner_profit_lock_ratio=0.35,
+                )
+
+            def prepare_history(self, instrument, candles):
+                return None
+
+            def generate_signal(self, instrument, history):
+                if len(history) != 1:
+                    return None
+                return Signal(
+                    instrument=instrument,
+                    direction=SignalDirection.LONG,
+                    strength=0.8,
+                    entry_price=history[-1].close,
+                    stop_price=95.0,
+                    take_profit=104.0,
+                    reason="test-entry",
+                )
+
+            def should_force_flatten_at(self, timestamp):
+                return False
+
+            def entry_block_reason_for_instrument(self, instrument, timestamp, direction=None):
+                return None
+
+        engine = BacktestEngine(
+            strategy=FakeRunnerStrategy(),
+            risk_manager=RiskManager(
+                RiskSection(max_risk_per_trade=0.01, max_gross_exposure=10.0, max_positions=1)
+            ),
+            backtest=BacktestSection(initial_cash=100_000, warmup_bars=1),
+            slippage_bps=0,
+            commission_bps=0,
+        )
+        result = engine.run_with_instruments({"SBER": candles}, {"SBER": instrument})
+
+        self.assertEqual(len(result.trades), 1)
+        self.assertEqual(result.trades[0].reason, ExitReason.PROFIT_PROTECT_STOP.value)
+        self.assertNotEqual(result.trades[0].exit_price, 104.0)
+        self.assertGreater(result.trades[0].exit_price, 100.0)
+        self.assertTrue(any(event.get("action") == "runner-activate" for event in result.events))
+
 
 if __name__ == "__main__":
     unittest.main()

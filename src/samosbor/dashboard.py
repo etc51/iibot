@@ -1542,12 +1542,31 @@ def _position_trailing_snapshot(
     entry_price = float(position.get("entry_price", 0.0))
     current_price = float(position.get("current_price", 0.0))
     stop_price = float(position.get("stop_price", 0.0))
+    take_profit = float(position.get("take_profit", 0.0))
     instrument = position.get("instrument", {})
     lot_size = int(instrument.get("lot_size", 1)) if isinstance(instrument, dict) else 1
     quantity_units = max(0, quantity_lots * max(1, lot_size))
     breakeven_trigger_pct = max(0.0, float(strategy.breakeven_trigger_pct))
     trigger_rub = max(0.0, float(strategy.trailing_profit_trigger_rub))
     lock_ratio = max(0.0, min(1.0, float(strategy.trailing_profit_lock_ratio)))
+    if bool(position.get("runner_active", False)):
+        if direction == "short":
+            protected_profit_rub = max(0.0, (entry_price - stop_price) * quantity_units)
+        else:
+            protected_profit_rub = max(0.0, (stop_price - entry_price) * quantity_units)
+        return {
+            "trailing_status": "runner",
+            "trailing_mode": "take-profit-runner",
+            "trailing_breakeven_trigger_pct": breakeven_trigger_pct,
+            "trailing_trigger_rub": trigger_rub,
+            "trailing_lock_ratio": max(0.0, min(1.0, float(strategy.runner_profit_lock_ratio))),
+            "trailing_trigger_price": take_profit,
+            "trailing_first_lock_price": float(position.get("runner_activation_price", take_profit)),
+            "trailing_remaining_rub": 0.0,
+            "trailing_protected_profit_rub": protected_profit_rub,
+            "trailing_activated_at": str(position.get("runner_activated_at", "")),
+            "runner_extreme_price": float(position.get("runner_extreme_price", 0.0)),
+        }
     if quantity_units <= 0:
         return {
             "trailing_status": "disabled",
@@ -1659,6 +1678,18 @@ def _render_trailing_cell(row: dict[str, object]) -> str:
     status = str(row.get("trailing_status", "disabled"))
     if status == "disabled":
         return "<span class=\"cell-note\">off</span>"
+    if status == "runner":
+        activated_at = str(row.get("trailing_activated_at", ""))
+        activation_price = float(row.get("trailing_first_lock_price", 0.0))
+        extreme_price = float(row.get("runner_extreme_price", 0.0))
+        protected_profit_rub = float(row.get("trailing_protected_profit_rub", 0.0))
+        state_line = f"runner since {_fmt_timestamp(activated_at)}" if activated_at else "runner active"
+        return (
+            f"<div class=\"cell-note\">{_escape(state_line)}</div>"
+            f"<div class=\"cell-note mono\">activation @ {activation_price:.6f}</div>"
+            f"<div class=\"cell-note mono\">extreme @ {extreme_price:.6f}</div>"
+            f"<div class=\"cell-note mono\">protects {_escape(_fmt_money(protected_profit_rub))}</div>"
+        )
 
     arm_price = float(row.get("trailing_trigger_price", 0.0))
     first_lock_price = float(row.get("trailing_first_lock_price", 0.0))
