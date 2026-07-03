@@ -1,0 +1,17 @@
+[Unit]
+Description=Samosbor paper dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/samosbor
+EnvironmentFile=/opt/samosbor/.env
+ExecStart=/opt/samosbor/scripts/server/run-dashboard.sh
+Restart=always
+RestartSec=5
+User=codex
+Group=codex
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,237 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
+
+from samosbor.autonomy.trade_review import build_trade_review_payload, trade_review_path
+from samosbor.config import RiskSection, StrategySection
+from samosbor.domain import PortfolioState, SignalDirection, TradeRecord
+
+
+def _trade(
+    *,
+    symbol: str,
+    entry_time: datetime,
+    net_pnl: float,
+    signal_strength: float,
+    direction: SignalDirection = SignalDirection.LONG,
+    entry_reason: str = "trend-up fast=101 slow=100",
+    entry_metadata: dict[str, object] | None = None,
+) -> TradeRecord:
+    return TradeRecord(
+        symbol=symbol,
+        direction=direction,
+        quantity_lots=10,
+        entry_time=entry_time,
+        exit_time=entry_time + timedelta(minutes=30),
+        entry_price=100.0,
+        exit_price=95.0,
+        gross_pnl=-50.0,
+        net_pnl=net_pnl,
+        reason="stop-loss",
+        signal_strength=signal_strength,
+        entry_reason=entry_reason,
+        entry_context_score=0.0,
+        entry_metadata=entry_metadata or {"trend_strength": 0.004},
+        initial_stop_price=95.0,
+        initial_take_profit=110.0,
+    )
+
+
+def test_trade_review_path_uses_state_stem():
+    assert str(trade_review_path(Path("state/paper_state.json"))).replace(
+        "\\",
+        "/",
+    ) == "state/paper_state_trade_review.json"
+
+
+def test_trade_review_classifies_errors_and_recommends_patches():
+    opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+    trades = [
+        _trade(symbol="SBER", entry_time=opened, net_pnl=-50.0, signal_strength=0.41),
+        _trade(symbol="SBER", entry_time=opened + timedelta(hours=1), net_pnl=-60.0, signal_strength=0.44),
+    ]
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=-110.0),
+        trades,
+        [],
+        strategy=StrategySection(min_signal_strength=0.4, allowed_entry_hours=[10, 11, 12]),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    assert payload["reviewed_trades"] == 2
+    assert payload["summary"]["mistake_trades"] == 2
+    assert payload["mistake_breakdown"]["stop-loss"] == 2
+    assert payload["mistake_breakdown"]["weak-signal-loss"] == 2
+    assert payload["config_patch_candidates"]["strategy"]["min_signal_strength"] > 0.4
+    assert all(
+        item["action"] != "block-weak-symbols"
+        for item in payload["recommendations"]
+    )
+    assert any(
+        item["action"] == "observe-weak-symbols"
+        and item["symbols"] == ["SBER"]
+        for item in payload["recommendations"]
+    )
+    assert payload["config_patch_candidates"]["risk"]["max_risk_per_trade"] == 0.008
+
+
+def test_trade_review_uses_order_book_microstructure_tags():
+    opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+    trades = [
+        _trade(
+            symbol="SBER",
+            entry_time=opened,
+            net_pnl=-50.0,
+            signal_strength=0.7,
+            entry_metadata={
+                "trend_strength": 0.004,
+                "microstructure": {
+                    "available": True,
+                    "spread_bps": 15.0,
+                    "entry_liquidity_cover": 1.2,
+                    "side_imbalance": -0.5,
+                },
+            },
+        )
+    ]
+
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=-50.0),
+        trades,
+        [],
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    review = payload["reviews"][0]
+    assert review["entry_microstructure"]["available"] is True
+    assert review["microstructure_quality"] == "wide-spread"
+    assert "wide-spread-entry" in review["mistake_tags"]
+    assert "thin-book-entry" in review["mistake_tags"]
+    assert "adverse-book-imbalance" in review["mistake_tags"]
+    assert payload["breakdowns"]["microstructure_quality"][0]["group"] == "wide-spread"
+
+
+def test_trade_review_exposes_post_close_analysis():
+    opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+    trades = [
+        _trade(
+            symbol="SBER",
+            entry_time=opened,
+            net_pnl=-50.0,
+            signal_strength=0.7,
+            entry_metadata={
+                "post_close_analysis": {
+                    "available": True,
+                    "stage": "post_close",
+                    "outcome": "error",
+                    "is_error": True,
+                    "ml_verdict": "ml_warned_loss",
+                    "summary": "error via stop-loss, -1.00R; ml_warned_loss",
+                }
+            },
+        )
+    ]
+
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=-50.0),
+        trades,
+        [],
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    analysis = payload["reviews"][0]["post_close_analysis"]
+    assert analysis["available"] is True
+    assert analysis["outcome"] == "error"
+    assert analysis["ml_verdict"] == "ml_warned_loss"
+
+
+def test_trade_review_does_not_raise_signal_threshold_for_already_filtered_loss():
+    opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+    trades = [
+        _trade(symbol="ROSN", entry_time=opened, net_pnl=-50.0, signal_strength=0.25),
+    ]
+
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=-50.0),
+        trades,
+        [],
+        strategy=StrategySection(min_signal_strength=0.3),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    assert "strategy" not in payload["config_patch_candidates"]
+
+
+def test_trade_review_prefers_nearest_collector_microstructure(tmp_path: Path):
+    opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+    micro_dir = tmp_path / "runs" / "microstructure" / "20250101"
+    micro_dir.mkdir(parents=True)
+    (micro_dir / "SBER.jsonl").write_text(
+        json.dumps(
+            {
+                "collected_at": "2025-01-01T10:00:12+00:00",
+                "available": True,
+                "symbol": "SBER",
+                "depth_requested": 10,
+                "depth_returned": 10,
+                "timestamp": "2025-01-01T10:00:11+00:00",
+                "best_bid": 99.9,
+                "best_ask": 100.0,
+                "mid_price": 99.95,
+                "spread_bps": 10.005,
+                "bid_depth_lots": 100.0,
+                "ask_depth_lots": 50.0,
+                "bid_depth_rub": 9990.0,
+                "ask_depth_rub": 5000.0,
+                "imbalance": 0.3333,
+                "requested_lots": 0,
+                "entry_liquidity_cover": 0.0,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    trades = [
+        _trade(
+            symbol="SBER",
+            entry_time=opened,
+            net_pnl=-50.0,
+            signal_strength=0.7,
+            entry_metadata={
+                "microstructure": {
+                    "available": True,
+                    "timestamp": "2025-01-01T10:00:20+00:00",
+                    "spread_bps": 1.0,
+                    "entry_liquidity_cover": 10.0,
+                    "side_imbalance": 0.0,
+                }
+            },
+        )
+    ]
+
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=-50.0),
+        trades,
+        [],
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+        microstructure_dir=tmp_path / "runs" / "microstructure",
+    )
+
+    microstructure = payload["reviews"][0]["entry_microstructure"]
+    assert microstructure["source"] == "collector"
+    assert microstructure["collector_lag_seconds"] == 8.0
+    assert microstructure["entry_event_microstructure_lag_seconds"] == 20.0
+    assert microstructure["requested_lots"] == 10
+    assert microstructure["entry_depth_lots"] == 50.0
+    assert microstructure["entry_liquidity_cover"] == 5.0

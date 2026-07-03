@@ -1,0 +1,12 @@
+[Unit]
+Description=Samosbor paper trading cycle
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/samosbor
+EnvironmentFile=/opt/samosbor/.env
+ExecStart=/opt/samosbor/scripts/server/run-paper-cycle.sh
+User=codex
+Group=codex

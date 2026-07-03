@@ -1,0 +1,14 @@
+[Unit]
+Description=Samosbor daily paper review and schedule tuning
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/samosbor
+EnvironmentFile=/opt/samosbor/.env
+ExecStart=/opt/samosbor/scripts/server/run-daily-review.sh
+TimeoutStartSec=45min
+Nice=10
+User=codex
+Group=codex

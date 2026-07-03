@@ -1,0 +1,103 @@
+﻿[app]
+name = "samosbor"
+timezone = "Europe/Moscow"
+
+[tbank]
+token_env = "TBANK_INVEST_TOKEN"
+sandbox_token_env = "TBANK_SANDBOX_TOKEN"
+account_id_env = "TBANK_ACCOUNT_ID"
+account_name = "Фьючерсы"
+app_name = "samosbor"
+ssl_verify_env = "SSL_TBANK_VERIFY"
+
+[data]
+source = "tbank"
+timeframe = "hour"
+history_days = 120
+
+[[data.instruments]]
+symbol = "USDRUBF"
+instrument_type = "future"
+
+[[data.instruments]]
+symbol = "CNYRUBF"
+instrument_type = "future"
+
+[strategy]
+style = "ema_adx_macd"
+fast_window = 10
+slow_window = 40
+atr_window = 14
+volume_window = 20
+breakout_window = 20
+require_breakout = false
+atr_stop_multiple = 1.25
+reward_to_risk = 1.5
+min_signal_strength = 0.0
+min_trend_strength = 0.002
+min_liquidity_rub = 1000000
+allow_shorts = true
+adx_window = 14
+adx_min = 15.0
+rsi_window = 14
+rsi_long_min = 50.0
+rsi_long_max = 75.0
+rsi_short_min = 25.0
+rsi_short_max = 50.0
+macd_fast = 12
+macd_slow = 26
+macd_signal = 9
+schedule_timezone = "Europe/Moscow"
+# Start broad across the liquid MOEX futures session; nightly autonomy can narrow this later.
+allowed_entry_hours = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+allowed_entry_weekdays = [0, 1, 2, 3, 4]
+
+[risk]
+max_risk_per_trade = 0.015
+max_gross_exposure = 2.0
+max_drawdown = 0.12
+cash_reserve_ratio = 0.0
+max_positions = 2
+kelly_lookback_trades = 20
+min_trades_for_kelly = 8
+
+[execution]
+mode = "local-paper"
+slippage_bps = 2.0
+commission_bps = 4.0
+state_path = "state/server_tbank_multi_300k_state.json"
+allow_live_trading = false
+
+[backtest]
+initial_cash = 300000
+warmup_bars = 60
+
+[reporting]
+output_dir = "runs"
+write_csv = true
+
+[research]
+strategy_styles = ["ema_adx_macd", "rsi_mean_reversion"]
+fast_windows = [10]
+slow_windows = [40]
+require_breakout_values = [false, true]
+atr_stop_multipliers = [1.25, 1.5, 1.75, 2.0]
+reward_to_risk_values = [1.5, 2.0, 2.5]
+trend_strength_values = [0.002]
+adx_min_values = [15.0, 20.0]
+rsi_long_max_values = [65.0, 70.0, 75.0]
+rsi_short_min_values = [25.0, 30.0, 35.0]
+subset_min_size = 1
+subset_max_size = 2
+top_n = 12
+min_trades = 8
+walk_forward_train_months = 6
+walk_forward_test_months = 1
+walk_forward_step_months = 1
+monte_carlo_iterations = 1000
+monte_carlo_horizon_months = 12
+trading_days_per_month = 20
+target_daily_profit_rub = 2000.0
+target_monthly_return_pct = 13.333
+target_monthly_profit_rub = 40000.0
+random_seed = 42

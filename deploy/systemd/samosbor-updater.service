@@ -1,0 +1,11 @@
+[Unit]
+Description=Update Samosbor from GitHub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/samosbor
+ExecStart=/opt/samosbor/scripts/server/update-from-github.sh
+User=codex
+Group=codex

@@ -1,0 +1,17 @@
+[Unit]
+Description=Samosbor order book microstructure collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/samosbor
+EnvironmentFile=/opt/samosbor/.env
+ExecStart=/opt/samosbor/scripts/server/run-microstructure-collector.sh
+Restart=always
+RestartSec=5
+User=codex
+Group=codex
+
+[Install]
+WantedBy=multi-user.target

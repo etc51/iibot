@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Samosbor daily paper review after the MOEX stock main session
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 15:45:00 UTC
+Persistent=true
+Unit=samosbor-daily-review.service
+
+[Install]
+WantedBy=timers.target

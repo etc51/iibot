@@ -1,0 +1,72 @@
+[app]
+name = "samosbor"
+timezone = "Europe/Moscow"
+
+[tbank]
+token_env = "TBANK_INVEST_TOKEN"
+sandbox_token_env = "TBANK_SANDBOX_TOKEN"
+account_id_env = "TBANK_ACCOUNT_ID"
+account_name = "Фьючерсы"
+app_name = "samosbor"
+ssl_verify_env = "SSL_TBANK_VERIFY"
+
+[data]
+source = "moex-data-pack"
+timeframe = "hour"
+history_days = 365
+local_data_pack_path = "D:/3_pips_x2_project/moex_futures_data_pack"
+
+[[data.instruments]]
+symbol = "USDRUBF"
+instrument_type = "future"
+
+[strategy]
+fast_window = 10
+slow_window = 40
+atr_window = 14
+volume_window = 20
+breakout_window = 20
+atr_stop_multiple = 2.0
+reward_to_risk = 1.5
+min_trend_strength = 0.004
+min_liquidity_rub = 1000000
+allow_shorts = true
+
+[risk]
+max_risk_per_trade = 0.01
+max_gross_exposure = 1.5
+max_drawdown = 0.12
+cash_reserve_ratio = 0.10
+max_positions = 2
+kelly_lookback_trades = 20
+min_trades_for_kelly = 8
+
+[execution]
+mode = "local-paper"
+slippage_bps = 2.0
+commission_bps = 4.0
+state_path = "state/local_pack_usdrubf_candidate_state.json"
+allow_live_trading = false
+
+[backtest]
+initial_cash = 1000000
+warmup_bars = 60
+
+[reporting]
+output_dir = "runs"
+write_csv = true
+
+[research]
+fast_windows = [10, 15, 20]
+slow_windows = [30, 40, 50]
+atr_stop_multipliers = [1.5, 2.0]
+reward_to_risk_values = [1.5, 2.0, 2.5]
+trend_strength_values = [0.004, 0.006]
+subset_min_size = 1
+subset_max_size = 1
+top_n = 10
+min_trades = 8
+monte_carlo_iterations = 1000
+monte_carlo_horizon_months = 12
+target_monthly_return_pct = 5.0
+random_seed = 42

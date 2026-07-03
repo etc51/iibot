@@ -1,0 +1,208 @@
+﻿[app]
+name = "samosbor"
+timezone = "Europe/Moscow"
+
+[tbank]
+token_env = "TBANK_INVEST_TOKEN"
+sandbox_token_env = "TBANK_SANDBOX_TOKEN"
+account_id_env = "TBANK_ACCOUNT_ID"
+account_name = "Акции"
+app_name = "samosbor"
+ssl_verify_env = "SSL_TBANK_VERIFY"
+
+[data]
+source = "parquet-directory"
+timeframe = "15min"
+history_days = 60
+parquet_dir_path = "D:/3_pips_x2_project/historical_data/D_moex_strategy_lab_data_processed"
+
+[[data.instruments]]
+symbol = "SBER"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "SBERP"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "GAZP"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "LKOH"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "NVTK"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "ROSN"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "TATN"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "PLZL"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "DOMRF"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "CHMF"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "T"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "YDEX"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "X5"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "OZON"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "POSI"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "MTLR"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "SMLT"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "EUTR"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "PHOR"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "TRNFP"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "VTBR"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "RAGR"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "ASTR"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "HEAD"
+instrument_type = "stock"
+
+[[data.instruments]]
+symbol = "VKCO"
+instrument_type = "stock"
+
+[strategy]
+style = "ema_adx_macd"
+fast_window = 20
+slow_window = 50
+atr_window = 14
+volume_window = 20
+breakout_window = 20
+opening_range_bars = 2
+rel_volume_threshold = 1.1
+require_breakout = false
+atr_stop_multiple = 1.5
+reward_to_risk = 2.5
+breakeven_trigger_pct = 0.75
+trailing_profit_trigger_rub = 1200.0
+trailing_profit_lock_ratio = 0.35
+min_signal_strength = 0.0
+min_trend_strength = 0.002
+min_liquidity_rub = 6000000
+allow_shorts = true
+adx_window = 14
+adx_min = 20.0
+rsi_window = 14
+rsi_long_min = 50.0
+rsi_long_max = 75.0
+rsi_short_min = 25.0
+rsi_short_max = 50.0
+macd_fast = 12
+macd_slow = 26
+macd_signal = 9
+schedule_timezone = "Europe/Moscow"
+allowed_entry_hours = [10, 11, 12, 13, 14, 15, 16, 17]
+allowed_entry_weekdays = [0, 1, 2, 3, 4]
+forced_flat_hours = [18, 19, 20, 21, 22, 23]
+forced_flat_weekdays = [0, 1, 2, 3, 4]
+
+[risk]
+max_risk_per_trade = 0.01
+max_gross_exposure = 1.5
+max_drawdown = 0.1
+cash_reserve_ratio = 0.08
+max_positions = 6
+max_position_exposure_ratio = 0.18
+kelly_lookback_trades = 20
+min_trades_for_kelly = 8
+
+[execution]
+mode = "local-paper"
+slippage_bps = 4.0
+commission_bps = 4.0
+state_path = "state/local_pack_stocks_intraday_300k_focused_state.json"
+allow_live_trading = false
+
+[backtest]
+initial_cash = 300000
+warmup_bars = 80
+
+[reporting]
+output_dir = "runs"
+write_csv = true
+
+[research]
+strategy_styles = ["ema_adx_macd", "ema_adx_donchian", "adx_regime_hybrid", "vwap_relvol_orb"]
+fast_windows = [10, 20]
+slow_windows = [30, 50]
+require_breakout_values = [false, true]
+opening_range_bars_values = [2, 3]
+rel_volume_threshold_values = [1.0, 1.15]
+atr_stop_multipliers = [1.5, 1.8, 2.0, 2.2]
+reward_to_risk_values = [2.0, 2.5, 3.0, 3.5]
+breakeven_trigger_pct_values = [0.0, 0.75, 1.0, 1.25]
+trailing_profit_trigger_rub_values = [0.0, 1200.0, 1800.0, 2400.0]
+trailing_profit_lock_ratio_values = [0.2, 0.25, 0.35, 0.5]
+trend_strength_values = [0.0015, 0.002]
+adx_min_values = [15.0, 20.0]
+rsi_long_max_values = [70.0, 75.0]
+rsi_short_min_values = [25.0, 30.0]
+subset_min_size = 1
+subset_max_size = 1
+top_n = 10
+min_trades = 10
+walk_forward_train_months = 4
+walk_forward_test_months = 1
+walk_forward_step_months = 1
+monte_carlo_iterations = 1000
+monte_carlo_horizon_months = 12
+trading_days_per_month = 20
+target_daily_profit_rub = 2000.0
+target_monthly_return_pct = 13.333
+target_monthly_profit_rub = 40000.0
+random_seed = 42

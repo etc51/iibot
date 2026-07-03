@@ -1,0 +1,11 @@
+[Unit]
+Description=Check GitHub for Samosbor updates
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=samosbor-updater.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,282 @@
+﻿[app]
+name = "samosbor"
+timezone = "Europe/Moscow"
+
+[tbank]
+token_env = "TBANK_INVEST_TOKEN"
+token_file = "%USERPROFILE%/Desktop/жрт новый про.txt"
+sandbox_token_env = "TBANK_SANDBOX_TOKEN"
+account_id_env = "TBANK_ACCOUNT_ID"
+account_name = "Акции"
+app_name = "samosbor"
+ssl_verify_env = "SSL_TBANK_VERIFY"
+
+[data]
+source = "tbank"
+timeframe = "15min"
+history_days = 10
+tbank_candle_source = "include-weekend"
+
+[[data.instruments]]
+symbol = "SBER"
+instrument_type = "stock"
+figi = "BBG004730N88"
+uid = "e6123145-9665-43e0-8413-cd61b8aa9b13"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "SBERP"
+instrument_type = "stock"
+figi = "BBG0047315Y7"
+uid = "c190ff1f-1447-4227-b543-316332699ca5"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "GAZP"
+instrument_type = "stock"
+figi = "BBG004730RP0"
+uid = "962e2a95-02a9-4171-abd7-aa198dbe643a"
+lot_size = 10
+
+[[data.instruments]]
+symbol = "LKOH"
+instrument_type = "stock"
+figi = "BBG004731032"
+uid = "02cfdf61-6298-4c0f-a9ca-9cabc82afaf3"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "NVTK"
+instrument_type = "stock"
+figi = "BBG00475KKY8"
+uid = "0da66728-6c30-44c4-9264-df8fac2467ee"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "ROSN"
+instrument_type = "stock"
+figi = "BBG004731354"
+uid = "fd417230-19cf-4e7b-9623-f7c9ca18ec6b"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "TATN"
+instrument_type = "stock"
+figi = "BBG004RVFFC0"
+uid = "88468f6c-c67a-4fb4-a006-53eed803883c"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "PLZL"
+instrument_type = "stock"
+figi = "BBG000R607Y3"
+uid = "10620843-28ce-44e8-80c2-f26ceb1bd3e1"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "DOMRF"
+instrument_type = "stock"
+figi = "TCS00A0ZZFU5"
+uid = "aac2b935-3d94-4030-83a1-f7acdd9b05a5"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "CHMF"
+instrument_type = "stock"
+figi = "BBG00475K6C3"
+uid = "fa6aae10-b8d5-48c8-bbfd-d320d925d096"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "T"
+instrument_type = "stock"
+figi = "TCS80A107UL4"
+uid = "87db07bc-0e02-4e29-90bb-05e8ef791d7b"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "YDEX"
+instrument_type = "stock"
+figi = "TCS00A107T19"
+uid = "7de75794-a27f-4d81-a39b-492345813822"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "X5"
+instrument_type = "stock"
+figi = "TCS03A108X38"
+uid = "0964acd0-e2cb-4810-a177-ef4ad8856ff0"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "OZON"
+instrument_type = "stock"
+figi = "TCS80A10CW95"
+uid = "75e003c2-ca14-4980-8d7b-e82ec6b6ffe1"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "POSI"
+instrument_type = "stock"
+figi = "TCS00A103X66"
+uid = "de08affe-4fbd-454e-9fd1-46a81b23f870"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "MTLR"
+instrument_type = "stock"
+figi = "BBG004S68598"
+uid = "eb4ba863-e85f-4f80-8c29-f2627938ee58"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "SMLT"
+instrument_type = "stock"
+figi = "BBG00F6NKQX3"
+uid = "4d813ab1-8bc9-4670-89ea-12bfbab6017d"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "EUTR"
+instrument_type = "stock"
+figi = "TCS00A1002V2"
+uid = "02b2ea14-3c4b-47e8-9548-45a8dbcc8f8a"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "PHOR"
+instrument_type = "stock"
+figi = "BBG004S689R0"
+uid = "9978b56f-782a-4a80-a4b1-a48cbecfd194"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "TRNFP"
+instrument_type = "stock"
+figi = "BBG00475KHX6"
+uid = "653d47e9-dbd4-407a-a1c3-47f897df4694"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "VTBR"
+instrument_type = "stock"
+figi = "BBG004730ZJ9"
+uid = "8e2b0325-0292-4654-8a18-4f63ed3b0e09"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "RAGR"
+instrument_type = "stock"
+figi = "TCS90A0JQUZ6"
+uid = "9b9a584e-448f-40da-9ba8-353b44ad697a"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "ASTR"
+instrument_type = "stock"
+figi = "RU000A106T36"
+uid = "aae786d8-e8f4-4428-91bb-cffa39ad01e4"
+lot_size = 1
+
+[strategy]
+style = "ema_adx_macd"
+fast_window = 20
+slow_window = 50
+atr_window = 14
+volume_window = 20
+breakout_window = 20
+opening_range_bars = 2
+rel_volume_threshold = 1.1
+require_breakout = false
+atr_stop_multiple = 1.5
+reward_to_risk = 2.5
+breakeven_trigger_pct = 0.75
+trailing_profit_trigger_rub = 1200.0
+trailing_profit_lock_ratio = 0.35
+min_signal_strength = 0.3
+min_trend_strength = 0.002
+min_liquidity_rub = 6000000
+allow_shorts = true
+adx_window = 14
+adx_min = 20.0
+rsi_window = 14
+rsi_long_min = 50.0
+rsi_long_max = 75.0
+rsi_short_min = 25.0
+rsi_short_max = 50.0
+macd_fast = 12
+macd_slow = 26
+macd_signal = 9
+order_book_depth = 10
+require_order_book = true
+max_entry_spread_bps = 12.0
+min_entry_liquidity_cover = 2.0
+min_entry_book_imbalance = -0.35
+use_market_context = true
+market_context_fast_window = 20
+market_context_slow_window = 50
+market_context_return_window = 4
+market_context_min_symbols = 8
+market_context_max_score = 0.25
+market_context_block_threshold = 0.15
+schedule_timezone = "Europe/Moscow"
+allowed_entry_hours = []
+allowed_entry_weekdays = []
+forced_flat_hours = []
+forced_flat_weekdays = []
+
+[risk]
+max_risk_per_trade = 0.01
+max_gross_exposure = 1.5
+max_drawdown = 0.1
+cash_reserve_ratio = 0.08
+max_positions = 6
+max_position_exposure_ratio = 0.18
+kelly_lookback_trades = 20
+min_trades_for_kelly = 8
+
+[execution]
+mode = "local-paper"
+slippage_bps = 4.0
+commission_bps = 4.0
+state_path = "state/server_tbank_stocks_intraday_300k_focused_state.json"
+allow_live_trading = false
+
+[backtest]
+initial_cash = 300000
+warmup_bars = 80
+
+[reporting]
+output_dir = "runs"
+write_csv = true
+
+[research]
+strategy_styles = ["ema_adx_macd", "ema_adx_donchian", "adx_regime_hybrid", "vwap_relvol_orb"]
+fast_windows = [10, 20]
+slow_windows = [30, 50]
+require_breakout_values = [false, true]
+opening_range_bars_values = [2, 3]
+rel_volume_threshold_values = [1.0, 1.15]
+atr_stop_multipliers = [1.5, 1.8, 2.0, 2.2]
+reward_to_risk_values = [2.0, 2.5, 3.0, 3.5]
+breakeven_trigger_pct_values = [0.0, 0.75, 1.0, 1.25]
+trailing_profit_trigger_rub_values = [0.0, 1200.0, 1800.0, 2400.0]
+trailing_profit_lock_ratio_values = [0.2, 0.25, 0.35, 0.5]
+trend_strength_values = [0.0015, 0.002]
+adx_min_values = [15.0, 20.0]
+rsi_long_max_values = [70.0, 75.0]
+rsi_short_min_values = [25.0]
+subset_min_size = 1
+subset_max_size = 1
+top_n = 10
+min_trades = 10
+walk_forward_train_months = 4
+walk_forward_test_months = 1
+walk_forward_step_months = 1
+monte_carlo_iterations = 1000
+monte_carlo_horizon_months = 12
+trading_days_per_month = 20
+target_daily_profit_rub = 2000.0
+target_monthly_return_pct = 13.333
+target_monthly_profit_rub = 40000.0
+random_seed = 42
