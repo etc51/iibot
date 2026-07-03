@@ -18,7 +18,7 @@ CONFIRMATION_AFTER_IMPULSE_TAG = "confirmation-after-impulse-learning"
 SHORT_AFTER_EXHAUSTION_TAG = "short-after-exhaustion-learning"
 LATE_REENTRY_TAG = "late-reentry-learning"
 
-_CATEGORICAL_FEATURES = ["symbol", "direction"]
+_CATEGORICAL_FEATURES = ["symbol", "direction", "adaptive_entry_grade"]
 _NUMERIC_FEATURES = [
     "hour_msk",
     "weekday",
@@ -36,6 +36,10 @@ _NUMERIC_FEATURES = [
     "entry_candle_ret1",
     "entry_candle_ret4",
     "entry_candle_range_ratio",
+    "entry_confirmation_ret_window",
+    "entry_confirmation_adverse_bars",
+    "adaptive_entry_elapsed_bars",
+    "adaptive_entry_favorable_move_atr",
     "micro_spread_bps",
     "micro_liquidity_cover",
     "micro_side_imbalance",
@@ -481,9 +485,16 @@ def _feature_row(
     microstructure = metadata.get("microstructure", {})
     if not isinstance(microstructure, dict):
         microstructure = {}
+    entry_confirmation = metadata.get("entry_confirmation", {})
+    if not isinstance(entry_confirmation, dict):
+        entry_confirmation = {}
+    adaptive_entry = metadata.get("adaptive_entry", {})
+    if not isinstance(adaptive_entry, dict):
+        adaptive_entry = {}
     return {
         "symbol": symbol.strip().upper(),
         "direction": direction.strip().lower(),
+        "adaptive_entry_grade": str(adaptive_entry.get("grade", "")).strip(),
         "hour_msk": localized.hour,
         "weekday": localized.weekday(),
         "signal_strength": _finite(signal_strength),
@@ -500,6 +511,10 @@ def _feature_row(
         "entry_candle_ret1": _finite(entry_candle.get("ret1", 0.0)),
         "entry_candle_ret4": _finite(entry_candle.get("ret4", 0.0)),
         "entry_candle_range_ratio": _finite(entry_candle.get("range_ratio", 0.0)),
+        "entry_confirmation_ret_window": _finite(entry_confirmation.get("ret_window", 0.0)),
+        "entry_confirmation_adverse_bars": _finite(entry_confirmation.get("adverse_bars", 0.0)),
+        "adaptive_entry_elapsed_bars": _finite(adaptive_entry.get("elapsed_bars", 0.0)),
+        "adaptive_entry_favorable_move_atr": _finite(adaptive_entry.get("favorable_move_atr", 0.0)),
         "micro_spread_bps": _finite(microstructure.get("spread_bps", 0.0)),
         "micro_liquidity_cover": _finite(microstructure.get("entry_liquidity_cover", 0.0)),
         "micro_side_imbalance": _finite(microstructure.get("side_imbalance", 0.0)),

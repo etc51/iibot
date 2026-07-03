@@ -851,6 +851,15 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
             self.assertTrue(reason.startswith("entry waits for adaptive confirmation"))
             events = json.loads((Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8"))
             self.assertEqual(events["events"][0]["metadata"]["adaptive_entry"]["grade"], "C")
+            feedback = json.loads(
+                signal_feedback_path(config.resolve_path(config.execution.state_path)).read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(feedback["pending"]), 1)
+            self.assertEqual(feedback["pending"][0]["symbol"], "DOMRF")
+            self.assertEqual(
+                feedback["pending"][0]["metadata"]["runtime_feedback"]["source"],
+                "runtime-blocked-signal",
+            )
 
     def test_learning_entry_block_rejects_low_quality_ml(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

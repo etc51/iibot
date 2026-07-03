@@ -42,8 +42,6 @@ def record_shadow_signal(
     slippage_bps: float = 0.0,
     commission_bps: float = 0.0,
 ) -> None:
-    if any(item["symbol"] == signal.instrument.symbol for item in payload.get("pending", [])):
-        return
     signature = (
         signal.instrument.symbol,
         signal.direction.value,
