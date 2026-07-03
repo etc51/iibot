@@ -11,6 +11,7 @@ from .autonomy.entry_schedule import (
     build_entry_schedule_tuning_payload,
     write_entry_schedule_tuning,
 )
+from .autonomy.entry_confirmation import build_entry_confirmation_context
 from .autonomy.entry_quality_tuning import (
     build_entry_quality_tuning_payload,
     write_entry_quality_tuning,
@@ -959,6 +960,7 @@ class TradingOrchestrator:
         provider = self._data_provider()
         instruments = provider.resolve_universe(self.config.data.instruments)
         history = provider.load_history(instruments)
+        confirmation_history = self._load_entry_confirmation_history(provider, instruments, history)
         marks = {symbol: candles[-1].close for symbol, candles in history.items() if candles}
 
         state_path = self.config.resolve_path(self.config.execution.state_path)
@@ -1048,6 +1050,11 @@ class TradingOrchestrator:
             shadow_signal = shadow_strategy.generate_signal(instrument, candles)
             if signal is not None:
                 signal = self._signal_with_entry_candle_context(signal, candles)
+                signal = self._signal_with_entry_confirmation_context(
+                    signal,
+                    confirmation_history.get(instrument.symbol, []),
+                    signal_timestamp=latest.timestamp,
+                )
                 signal = self._signal_with_setup_learning_tags(
                     signal,
                     broker.trades,
@@ -1055,6 +1062,11 @@ class TradingOrchestrator:
                 )
             if shadow_signal is not None:
                 shadow_signal = self._signal_with_entry_candle_context(shadow_signal, candles)
+                shadow_signal = self._signal_with_entry_confirmation_context(
+                    shadow_signal,
+                    confirmation_history.get(instrument.symbol, []),
+                    signal_timestamp=latest.timestamp,
+                )
             if signal is None:
                 if (
                     shadow_signal is not None
@@ -1113,23 +1125,25 @@ class TradingOrchestrator:
                 signal_for_entry = signal
                 microstructure_block_reason = None
                 if decision.approved:
-                    signal_for_entry = self._signal_with_entry_microstructure(
-                        provider,
-                        signal,
-                        quantity_lots=decision.quantity_lots,
-                    )
-                    signal_for_entry = self._signal_with_learning_assessment(
-                        signal_for_entry,
-                        signal_feedback,
-                        timestamp=latest.timestamp,
-                        quantity_lots=decision.quantity_lots,
-                    )
-                    microstructure_block_reason = self._microstructure_block_reason(signal_for_entry)
+                    microstructure_block_reason = self._entry_confirmation_block_reason(signal_for_entry)
                     if microstructure_block_reason is None:
-                        microstructure_block_reason = self._learning_entry_block_reason(
-                            signal_for_entry,
+                        signal_for_entry = self._signal_with_entry_microstructure(
+                            provider,
+                            signal,
                             quantity_lots=decision.quantity_lots,
                         )
+                        signal_for_entry = self._signal_with_learning_assessment(
+                            signal_for_entry,
+                            signal_feedback,
+                            timestamp=latest.timestamp,
+                            quantity_lots=decision.quantity_lots,
+                        )
+                        microstructure_block_reason = self._microstructure_block_reason(signal_for_entry)
+                        if microstructure_block_reason is None:
+                            microstructure_block_reason = self._learning_entry_block_reason(
+                                signal_for_entry,
+                                quantity_lots=decision.quantity_lots,
+                            )
                     if microstructure_block_reason is None:
                         signal_for_entry, decision = self._apply_learning_size_adjustment(
                             signal_for_entry,
@@ -1191,9 +1205,46 @@ class TradingOrchestrator:
         write_portfolio_snapshot(output_dir / "portfolio.json", broker.portfolio)
         return {"summary": summary, "output_dir": str(output_dir)}
 
+    def _load_entry_confirmation_history(self, provider, instruments, primary_history):
+        timeframe = self.config.strategy.entry_confirmation_timeframe.strip()
+        if not timeframe:
+            return {}
+        if timeframe.lower() == self.config.data.timeframe.lower():
+            return primary_history
+        if hasattr(provider, "load_history_for_timeframe"):
+            try:
+                return provider.load_history_for_timeframe(instruments, timeframe)
+            except Exception as exc:  # pragma: no cover - live API dependent
+                LOGGER.warning("Entry confirmation history failed for %s: %s", timeframe, exc)
+                return {}
+
+        confirmation_config = replace(
+            self.config,
+            data=replace(self.config.data, timeframe=timeframe),
+        )
+        confirmation_provider = TradingOrchestrator(confirmation_config)._data_provider()
+        try:
+            return confirmation_provider.load_history(instruments)
+        except Exception as exc:  # pragma: no cover - live API dependent
+            LOGGER.warning("Entry confirmation history failed for %s: %s", timeframe, exc)
+            return {}
+
     def _signal_with_entry_candle_context(self, signal, candles):
         metadata = dict(signal.metadata)
         metadata["entry_candle"] = build_entry_candle_context(candles, signal.direction.value)
+        return replace(signal, metadata=metadata)
+
+    def _signal_with_entry_confirmation_context(self, signal, candles, *, signal_timestamp: datetime):
+        metadata = dict(signal.metadata)
+        metadata["entry_confirmation"] = build_entry_confirmation_context(
+            candles,
+            signal.direction.value,
+            signal_timestamp=signal_timestamp,
+            primary_timeframe=self.config.data.timeframe,
+            confirmation_timeframe=self.config.strategy.entry_confirmation_timeframe,
+            min_bars=self.config.strategy.entry_confirmation_min_bars,
+            max_adverse_ret=self.config.strategy.entry_confirmation_max_adverse_ret,
+        )
         return replace(signal, metadata=metadata)
 
     def _signal_with_setup_learning_tags(self, signal, recent_trades, *, timestamp: datetime):
@@ -1310,6 +1361,18 @@ class TradingOrchestrator:
 
     def _learning_confirmation_block_reason(self, signal) -> str | None:
         return self._learning_entry_block_reason(signal, quantity_lots=1)
+
+    def _entry_confirmation_block_reason(self, signal) -> str | None:
+        confirmation = signal.metadata.get("entry_confirmation", {})
+        if not isinstance(confirmation, dict):
+            return None
+        if not confirmation.get("available"):
+            return None
+        if confirmation.get("against_direction"):
+            timeframe = confirmation.get("timeframe", "lower timeframe")
+            reason = str(confirmation.get("reason", "against entry direction"))
+            return f"entry blocked by {timeframe} confirmation ({reason})"
+        return None
 
     def _signal_with_entry_microstructure(self, provider, signal, *, quantity_lots: int):
         metadata = dict(signal.metadata)

@@ -104,6 +104,9 @@ class StrategySection:
     blocked_short_symbols: list[str] = field(default_factory=list)
     forced_flat_hours: list[int] = field(default_factory=list)
     forced_flat_weekdays: list[int] = field(default_factory=list)
+    entry_confirmation_timeframe: str = ""
+    entry_confirmation_min_bars: int = 3
+    entry_confirmation_max_adverse_ret: float = 0.0015
 
 
 @dataclass(frozen=True)

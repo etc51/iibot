@@ -19,6 +19,7 @@ def test_focused_runtime_matches_project_goal():
     assert config.strategy.allowed_entry_hours == []
     assert config.strategy.allowed_entry_weekdays == []
     assert config.strategy.forced_flat_hours == []
+    assert config.strategy.entry_confirmation_timeframe == "5min"
     assert config.backtest.initial_cash == 300_000
     assert effective_target_daily_profit_rub(config.research, config.backtest) == 2_000.0
     assert effective_target_monthly_profit_rub(config.research, config.backtest) == 40_000.0

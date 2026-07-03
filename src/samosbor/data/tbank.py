@@ -279,6 +279,21 @@ class TBankMarketDataProvider:
             for instrument in resolved
         }
 
+    def load_history_for_timeframe(
+        self,
+        instruments: list[Instrument],
+        timeframe: str,
+    ) -> dict[str, list[Candle]]:
+        resolved = self.resolve_universe(instruments)
+        return {
+            instrument.symbol: self.get_candles(
+                instrument,
+                timeframe=timeframe,
+                history_days=self.config.data.history_days,
+            )
+            for instrument in resolved
+        }
+
     def get_last_prices(self, instruments: list[Instrument]) -> dict[str, float]:
         _, _, _, _, _, quotation_to_decimal = _sdk_imports()
         resolved = self.resolve_universe(instruments)
