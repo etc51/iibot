@@ -24,7 +24,7 @@ def test_focused_runtime_matches_project_goal():
     assert config.strategy.entry_confirmation_timeframe == "5min"
     assert config.strategy.entry_confirmation_max_adverse_ret == 0.005
     assert config.strategy.adaptive_entry_enabled is True
-    assert config.strategy.adaptive_entry_max_chase_atr == 0.8
+    assert config.strategy.adaptive_entry_max_chase_atr == 0.5
     assert config.strategy.alternative_plan_enabled is True
     assert config.strategy.alternative_plan_entry_offset_bars == 2
     assert config.strategy.alternative_plan_atr_stop_multiple == 1.0

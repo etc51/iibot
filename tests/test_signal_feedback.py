@@ -125,29 +125,6 @@ class SignalFeedbackTest(unittest.TestCase):
         self.assertEqual(trades[0].reason, "expired")
         self.assertAlmostEqual(trades[0].net_pnl, -0.8, places=6)
 
-    def test_record_shadow_signal_allows_multiple_pending_for_same_symbol(self):
-        payload = {"pending": [], "resolved": []}
-        instrument = Instrument(symbol="OZON", instrument_type=InstrumentType.STOCK, lot_size=1)
-        first = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
-        second = first + timedelta(minutes=15)
-        signal = Signal(
-            instrument=instrument,
-            direction=SignalDirection.SHORT,
-            strength=0.7,
-            entry_price=100.0,
-            stop_price=101.0,
-            take_profit=98.0,
-            reason="test",
-        )
-
-        record_shadow_signal(payload, signal, timestamp=first, horizon_bars=3)
-        record_shadow_signal(payload, signal, timestamp=second, horizon_bars=3)
-        record_shadow_signal(payload, signal, timestamp=second, horizon_bars=3)
-
-        self.assertEqual(len(payload["pending"]), 2)
-        self.assertEqual(payload["pending"][0]["created_at"], first.isoformat())
-        self.assertEqual(payload["pending"][1]["created_at"], second.isoformat())
-
     def test_shadow_signal_uses_rub_scaled_pnl_and_commissions(self):
         payload = {"pending": [], "resolved": []}
         signal = Signal(

@@ -58,23 +58,11 @@ def build_adaptive_entry_context(
     favorable_move_atr = _favorable_move_atr(signal, anchor, atr_value)
     chase_limit = max(0.0, float(strategy.adaptive_entry_max_chase_atr))
     confirmed_after_wait = _confirmed_after_wait(signal.direction, entry_candle, confirmation)
-    lower_timeframe_confirmed = _lower_timeframe_confirms(confirmation)
-    strong_directional_context = _market_context_favors_direction(
-        signal.direction,
-        signal.context_score,
-        strategy.market_context_block_threshold,
-    )
 
     action = "enter-now"
     block_reason = ""
-    size_factor = 1.0
     if grade != "A":
-        if grade == "B" and lower_timeframe_confirmed:
-            action = "enter-now-5m-confirmed"
-        elif grade == "C" and lower_timeframe_confirmed and strong_directional_context:
-            action = "enter-reduced-5m-market-confirmed"
-            size_factor = 0.5
-        elif favorable_move_atr is not None and favorable_move_atr > chase_limit:
+        if favorable_move_atr is not None and favorable_move_atr > chase_limit:
             action = "skip-chase"
             block_reason = (
                 f"{ADAPTIVE_SKIP_PREFIX} "
@@ -109,9 +97,6 @@ def build_adaptive_entry_context(
         "max_wait_bars": max_wait_bars,
         "elapsed_bars": elapsed_bars,
         "confirmed_after_wait": confirmed_after_wait,
-        "lower_timeframe_confirmed": lower_timeframe_confirmed,
-        "strong_directional_context": strong_directional_context,
-        "size_factor": size_factor,
         "favorable_move_atr": round(favorable_move_atr, 4) if favorable_move_atr is not None else None,
         "max_chase_atr": chase_limit,
         "anchor_timestamp": anchor.get("timestamp") if anchor else None,
@@ -174,29 +159,6 @@ def _confirmed_after_wait(
     adverse_bars = int(_float(confirmation.get("adverse_bars"), 0.0))
     lower_direction_ok = ret_window < 0 if direction == SignalDirection.SHORT else ret_window > 0
     return (direction_confirmed and not reversal) or (not reversal and lower_direction_ok and adverse_bars <= 1)
-
-
-def _lower_timeframe_confirms(confirmation: dict[str, object]) -> bool:
-    if confirmation.get("against_direction"):
-        return False
-    if confirmation.get("confirmation_ok"):
-        return True
-    adverse_bars = int(_float(confirmation.get("adverse_bars"), 0.0))
-    ret_window = _float(confirmation.get("ret_window", 0.0), 0.0)
-    return adverse_bars <= 1 and abs(ret_window) > 0.0
-
-
-def _market_context_favors_direction(
-    direction: SignalDirection,
-    context_score: float,
-    threshold: float,
-) -> bool:
-    threshold = max(0.0, float(threshold))
-    if threshold <= 0:
-        return False
-    if direction == SignalDirection.SHORT:
-        return context_score <= -threshold
-    return context_score >= threshold
 
 
 def _is_mild_reversal(

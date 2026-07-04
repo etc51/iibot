@@ -49,6 +49,8 @@ def record_shadow_signal(
     runner_profit_lock_ratio: float = 0.0,
     runner_atr_window: int = 14,
 ) -> None:
+    if any(item["symbol"] == signal.instrument.symbol for item in payload.get("pending", [])):
+        return
     signature = (
         signal.instrument.symbol,
         signal.direction.value,

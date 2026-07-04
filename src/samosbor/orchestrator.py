@@ -1199,12 +1199,6 @@ class TradingOrchestrator:
                     signal.direction,
                 )
                 if entry_block_reason is not None:
-                    self._record_blocked_signal_feedback(
-                        signal_feedback,
-                        signal,
-                        timestamp=latest.timestamp,
-                        reason=entry_block_reason,
-                    )
                     cycle_events.append(
                         {
                             "timestamp": latest.timestamp.isoformat(),
@@ -1220,12 +1214,6 @@ class TradingOrchestrator:
                     continue
                 adaptive_block_reason = adaptive_entry_block_reason(signal)
                 if adaptive_block_reason is not None:
-                    self._record_blocked_signal_feedback(
-                        signal_feedback,
-                        signal,
-                        timestamp=latest.timestamp,
-                        reason=adaptive_block_reason,
-                    )
                     cycle_events.append(
                         {
                             "timestamp": latest.timestamp.isoformat(),
@@ -1264,10 +1252,6 @@ class TradingOrchestrator:
                                 quantity_lots=decision.quantity_lots,
                             )
                     if microstructure_block_reason is None:
-                        signal_for_entry, decision = self._apply_adaptive_size_adjustment(
-                            signal_for_entry,
-                            decision,
-                        )
                         signal_for_entry, decision = self._apply_learning_size_adjustment(
                             signal_for_entry,
                             decision,
@@ -1285,14 +1269,6 @@ class TradingOrchestrator:
                     "metadata": dict(signal_for_entry.metadata),
                 }
                 cycle_events.append(event)
-                if not event["approved"]:
-                    self._record_blocked_signal_feedback(
-                        signal_feedback,
-                        signal_for_entry,
-                        timestamp=latest.timestamp,
-                        reason=str(event["reason"]),
-                        quantity_lots=max(1, int(decision.quantity_lots or 1)),
-                    )
                 if decision.approved:
                     if microstructure_block_reason is None:
                         broker.open_position(signal_for_entry, decision.quantity_lots, latest.timestamp)
@@ -1464,32 +1440,6 @@ class TradingOrchestrator:
             extreme_price=extreme_price,
         )
 
-    def _record_blocked_signal_feedback(
-        self,
-        feedback_payload,
-        signal,
-        *,
-        timestamp: datetime,
-        reason: str,
-        quantity_lots: int = 1,
-    ) -> None:
-        metadata = dict(signal.metadata)
-        metadata["runtime_feedback"] = {
-            "source": "runtime-blocked-signal",
-            "blocked": True,
-            "reason": reason,
-        }
-        record_shadow_signal(
-            feedback_payload,
-            replace(signal, metadata=metadata),
-            timestamp=timestamp,
-            horizon_bars=default_signal_horizon_bars(self.config.data.timeframe),
-            quantity_lots=max(1, int(quantity_lots or 1)),
-            slippage_bps=self.config.execution.slippage_bps,
-            commission_bps=self.config.execution.commission_bps,
-            **self._signal_feedback_runner_kwargs(),
-        )
-
     def _signal_feedback_runner_kwargs(self) -> dict[str, object]:
         strategy = self.config.strategy
         return {
@@ -1499,34 +1449,6 @@ class TradingOrchestrator:
             "runner_profit_lock_ratio": strategy.runner_profit_lock_ratio,
             "runner_atr_window": strategy.atr_window,
         }
-
-    def _apply_adaptive_size_adjustment(self, signal, decision):
-        metadata = dict(signal.metadata)
-        adaptive = metadata.get("adaptive_entry", {})
-        if not isinstance(adaptive, dict):
-            return signal, decision
-        size_factor = float(adaptive.get("size_factor", 1.0) or 1.0)
-        if size_factor >= 1.0 or size_factor <= 0.0 or decision.quantity_lots <= 1:
-            return signal, decision
-
-        original_quantity = int(decision.quantity_lots)
-        adjusted_quantity = max(1, int(original_quantity * size_factor))
-        if adjusted_quantity >= original_quantity:
-            return signal, decision
-
-        ratio = adjusted_quantity / original_quantity
-        metadata["adaptive_size_adjustment"] = {
-            "reason": str(adaptive.get("action", "adaptive reduced-size entry")),
-            "original_quantity_lots": original_quantity,
-            "adjusted_quantity_lots": adjusted_quantity,
-            "factor": round(ratio, 4),
-        }
-        adjusted_decision = replace(
-            decision,
-            quantity_lots=adjusted_quantity,
-            estimated_notional_rub=decision.estimated_notional_rub * ratio,
-        )
-        return replace(signal, metadata=metadata), adjusted_decision
 
     def _apply_learning_size_adjustment(self, signal, decision):
         metadata = dict(signal.metadata)
