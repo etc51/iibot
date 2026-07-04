@@ -9,7 +9,7 @@ from pathlib import Path
 from samosbor.autonomy.signal_feedback import signal_feedback_path
 from samosbor.autonomy.trade_review import trade_review_path
 from samosbor.config import load_config
-from samosbor.domain import Candle, ExitReason, Instrument, InstrumentType, RiskDecision, Signal, SignalDirection
+from samosbor.domain import Candle, ExitReason, Instrument, InstrumentType, Signal, SignalDirection
 from samosbor.execution.paper import LocalPaperBroker
 from samosbor.orchestrator import TradingOrchestrator
 
@@ -649,7 +649,7 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
                 {"entry blocked by wide spread (20.00 bps)": 1},
             )
 
-    def test_paper_cycle_waits_for_short_exhaustion_confirmation(self):
+    def test_paper_cycle_observes_short_exhaustion_without_blocking_entry(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             config_dir = root / "configs"
@@ -739,12 +739,11 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
             )
 
             self.assertEqual(summary["signals_total"], 1)
-            self.assertEqual(summary["signals_approved"], 0)
-            self.assertEqual(len(state.portfolio.positions), 0)
-            self.assertEqual(
-                summary["signal_rejection_reason_breakdown"],
-                {"entry waits for next candle after short exhaustion": 1},
-            )
+            self.assertEqual(summary["signals_approved"], 1)
+            self.assertEqual(len(state.portfolio.positions), 1)
+            position = state.portfolio.positions["YDEX"]
+            self.assertIn("short-after-exhaustion-learning", position.entry_metadata["setup_learning_tags"])
+            self.assertEqual(summary["signal_rejection_reason_breakdown"], {})
 
     def test_paper_cycle_blocks_short_when_5m_confirmation_rebounds(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -864,197 +863,6 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
             self.assertEqual(
                 summary["signal_rejection_reason_breakdown"],
                 {"entry blocked by 5min confirmation (5m rebound against short)": 1},
-            )
-
-    def test_learning_entry_block_rejects_low_quality_ml(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            config_dir = root / "configs"
-            config_dir.mkdir(parents=True)
-            config_path = config_dir / "paper.toml"
-            config_path.write_text(
-                "\n".join(
-                    [
-                        "[app]",
-                        'timezone = "Europe/Moscow"',
-                        "",
-                        "[data]",
-                        "",
-                        "[strategy]",
-                        "",
-                        "[execution]",
-                        'mode = "local-paper"',
-                        "allow_live_trading = false",
-                        "",
-                        "[backtest]",
-                        "",
-                        "[reporting]",
-                        "",
-                        "[research]",
-                        "",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            config = load_config(config_path)
-            instrument = Instrument(symbol="MTLR", instrument_type=InstrumentType.STOCK, lot_size=1)
-            signal = Signal(
-                instrument=instrument,
-                direction=SignalDirection.SHORT,
-                strength=0.9,
-                entry_price=35.5,
-                stop_price=35.9,
-                take_profit=34.5,
-                reason="test",
-                metadata={
-                    "entry_candle": {"direction_confirmed_by_close": True},
-                    "ml_learning": {
-                        "available": True,
-                        "blocks_entry": True,
-                        "probability_profit": 0.224,
-                        "expected_pnl_position_rub": -1603.45,
-                        "learning_tags": ["low-quality-learning", "negative-expectancy-learning"],
-                    },
-                },
-            )
-            orchestrator = _PaperCycleOrchestrator(config, _FakeProvider([], {}))
-
-            reason = orchestrator._learning_entry_block_reason(signal, quantity_lots=660)
-
-            self.assertEqual(reason, "entry blocked by low ML probability (0.22 < 0.40)")
-
-    def test_learning_entry_block_requires_edge_above_commission_floor(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            config_dir = root / "configs"
-            config_dir.mkdir(parents=True)
-            config_path = config_dir / "paper.toml"
-            config_path.write_text(
-                "\n".join(
-                    [
-                        "[app]",
-                        'timezone = "Europe/Moscow"',
-                        "",
-                        "[data]",
-                        "",
-                        "[strategy]",
-                        "",
-                        "[execution]",
-                        'mode = "local-paper"',
-                        "allow_live_trading = false",
-                        "commission_bps = 4.0",
-                        "",
-                        "[backtest]",
-                        "",
-                        "[reporting]",
-                        "",
-                        "[research]",
-                        "",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            config = load_config(config_path)
-            instrument = Instrument(symbol="TATN", instrument_type=InstrumentType.STOCK, lot_size=1)
-            signal = Signal(
-                instrument=instrument,
-                direction=SignalDirection.SHORT,
-                strength=0.9,
-                entry_price=500.0,
-                stop_price=505.0,
-                take_profit=487.5,
-                reason="test",
-                metadata={
-                    "entry_candle": {"direction_confirmed_by_close": True},
-                    "ml_learning": {
-                        "available": True,
-                        "blocks_entry": True,
-                        "probability_profit": 0.62,
-                        "expected_pnl_position_rub": 90.0,
-                        "required_net_edge_rub": 160.0,
-                        "learning_tags": ["commission-edge-learning"],
-                    },
-                },
-            )
-            orchestrator = _PaperCycleOrchestrator(config, _FakeProvider([], {}))
-
-            reason = orchestrator._learning_entry_block_reason(signal, quantity_lots=100)
-
-            self.assertEqual(
-                reason,
-                "entry blocked by ML edge below commission floor (90.00 <= 160.00 RUB)",
-            )
-
-    def test_learning_size_adjustment_halves_low_quality_entry(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            config_dir = root / "configs"
-            config_dir.mkdir(parents=True)
-            config_path = config_dir / "paper.toml"
-            config_path.write_text(
-                "\n".join(
-                    [
-                        "[app]",
-                        'timezone = "Europe/Moscow"',
-                        "",
-                        "[data]",
-                        "",
-                        "[strategy]",
-                        "",
-                        "[execution]",
-                        'mode = "local-paper"',
-                        "allow_live_trading = false",
-                        "",
-                        "[backtest]",
-                        "",
-                        "[reporting]",
-                        "",
-                        "[research]",
-                        "",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            config = load_config(config_path)
-            instrument = Instrument(symbol="OZON", instrument_type=InstrumentType.STOCK, lot_size=1)
-            signal = Signal(
-                instrument=instrument,
-                direction=SignalDirection.SHORT,
-                strength=0.8,
-                entry_price=100.0,
-                stop_price=101.0,
-                take_profit=97.5,
-                reason="test",
-                metadata={
-                    "ml_learning": {
-                        "available": True,
-                        "probability_profit": 0.32,
-                        "learning_tags": ["low-quality-learning"],
-                    }
-                },
-            )
-            decision = RiskDecision(
-                True,
-                "approved",
-                quantity_lots=11,
-                risk_budget_rub=1000.0,
-                estimated_notional_rub=1100.0,
-            )
-            orchestrator = _PaperCycleOrchestrator(config, _FakeProvider([], {}))
-
-            adjusted_signal, adjusted_decision = orchestrator._apply_learning_size_adjustment(signal, decision)
-
-            self.assertEqual(adjusted_decision.quantity_lots, 5)
-            self.assertEqual(
-                adjusted_signal.metadata["learning_size_adjustment"]["original_quantity_lots"],
-                11,
-            )
-            self.assertEqual(
-                adjusted_signal.metadata["learning_size_adjustment"]["adjusted_quantity_lots"],
-                5,
             )
 
     def test_paper_cycle_records_shadow_evidence_outside_runtime_entry_hours(self):

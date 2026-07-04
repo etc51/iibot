@@ -38,13 +38,6 @@ from .autonomy.effective_config import (
     write_effective_config,
 )
 from .autonomy.ml_learning import (
-    COMMISSION_EDGE_TAG,
-    LATE_REENTRY_TAG,
-    LOW_QUALITY_PROBABILITY_THRESHOLD,
-    LOW_QUALITY_TAG,
-    NEGATIVE_EXPECTANCY_TAG,
-    SHORT_AFTER_EXHAUSTION_TAG,
-    CONFIRMATION_AFTER_IMPULSE_TAG,
     assess_signal_learning,
     build_entry_candle_context,
     build_setup_learning_tags,
@@ -1225,16 +1218,6 @@ class TradingOrchestrator:
                             quantity_lots=decision.quantity_lots,
                         )
                         microstructure_block_reason = self._microstructure_block_reason(signal_for_entry)
-                        if microstructure_block_reason is None:
-                            microstructure_block_reason = self._learning_entry_block_reason(
-                                signal_for_entry,
-                                quantity_lots=decision.quantity_lots,
-                            )
-                    if microstructure_block_reason is None:
-                        signal_for_entry, decision = self._apply_learning_size_adjustment(
-                            signal_for_entry,
-                            decision,
-                        )
 
                 event = {
                     "timestamp": latest.timestamp.isoformat(),
@@ -1417,86 +1400,6 @@ class TradingOrchestrator:
             "runner_profit_lock_ratio": strategy.runner_profit_lock_ratio,
             "runner_atr_window": strategy.atr_window,
         }
-
-    def _apply_learning_size_adjustment(self, signal, decision):
-        metadata = dict(signal.metadata)
-        learning = metadata.get("ml_learning", {})
-        if not isinstance(learning, dict) or not learning.get("available"):
-            return signal, decision
-
-        tags = set(str(tag) for tag in learning.get("learning_tags", []) if str(tag))
-        should_reduce = (
-            LOW_QUALITY_TAG in tags
-            or NEGATIVE_EXPECTANCY_TAG in tags
-            or float(learning.get("probability_profit", 1.0) or 1.0) < LOW_QUALITY_PROBABILITY_THRESHOLD
-        )
-        if not should_reduce or decision.quantity_lots <= 1:
-            return signal, decision
-
-        original_quantity = int(decision.quantity_lots)
-        adjusted_quantity = max(1, original_quantity // 2)
-        if adjusted_quantity >= original_quantity:
-            return signal, decision
-
-        ratio = adjusted_quantity / original_quantity
-        metadata["learning_size_adjustment"] = {
-            "reason": "low-quality ML setup",
-            "original_quantity_lots": original_quantity,
-            "adjusted_quantity_lots": adjusted_quantity,
-            "factor": round(ratio, 4),
-        }
-        adjusted_decision = replace(
-            decision,
-            quantity_lots=adjusted_quantity,
-            estimated_notional_rub=decision.estimated_notional_rub * ratio,
-        )
-        return replace(signal, metadata=metadata), adjusted_decision
-
-    def _learning_entry_block_reason(self, signal, *, quantity_lots: int) -> str | None:
-        metadata = dict(signal.metadata)
-        entry_candle = metadata.get("entry_candle", {})
-        if not isinstance(entry_candle, dict):
-            return None
-        learning = metadata.get("ml_learning", {})
-        learning_tags = set()
-        setup_tags = set(str(tag) for tag in metadata.get("setup_learning_tags", []) if str(tag))
-        if isinstance(learning, dict):
-            learning_tags = set(str(tag) for tag in learning.get("learning_tags", []) if str(tag))
-        learning_tags.update(setup_tags)
-
-        if SHORT_AFTER_EXHAUSTION_TAG in learning_tags:
-            return "entry waits for next candle after short exhaustion"
-
-        direction_confirmed = bool(entry_candle.get("direction_confirmed_by_close"))
-
-        if not direction_confirmed and CONFIRMATION_AFTER_IMPULSE_TAG in learning_tags:
-            return "entry waits for confirmation after impulse"
-
-        if isinstance(learning, dict) and learning.get("available") and learning.get("blocks_entry"):
-            probability = float(learning.get("probability_profit", 1.0) or 1.0)
-            expected_position = float(learning.get("expected_pnl_position_rub", 0.0) or 0.0)
-            required_edge = float(learning.get("required_net_edge_rub", 0.0) or 0.0)
-            if probability < LOW_QUALITY_PROBABILITY_THRESHOLD or LOW_QUALITY_TAG in learning_tags:
-                return (
-                    "entry blocked by low ML probability "
-                    f"({probability:.2f} < {LOW_QUALITY_PROBABILITY_THRESHOLD:.2f})"
-                )
-            if expected_position < 0 or NEGATIVE_EXPECTANCY_TAG in learning_tags:
-                return f"entry blocked by negative ML expectancy ({expected_position:.2f} RUB)"
-            if COMMISSION_EDGE_TAG in learning_tags:
-                return (
-                    "entry blocked by ML edge below commission floor "
-                    f"({expected_position:.2f} <= {required_edge:.2f} RUB)"
-                )
-
-        if not direction_confirmed and LATE_REENTRY_TAG in learning_tags:
-            probability = float(learning.get("probability_profit", 0.0) or 0.0) if isinstance(learning, dict) else 0.0
-            if probability < 0.50:
-                return "entry waits for late reentry confirmation"
-        return None
-
-    def _learning_confirmation_block_reason(self, signal) -> str | None:
-        return self._learning_entry_block_reason(signal, quantity_lots=1)
 
     def _entry_confirmation_block_reason(self, signal) -> str | None:
         confirmation = signal.metadata.get("entry_confirmation", {})

@@ -300,10 +300,6 @@ def _scan_signal_candidates(
             commission_bps=config.execution.commission_bps,
         )
         row["ml_learning"] = ml_learning
-        if ml_learning.get("blocks_entry"):
-            row["runtime_block_reasons"].append(str(ml_learning.get("reason", "entry blocked by ML learning")))
-            row["block_tags"].append("ml-learning")
-            row["tradable"] = False
     return rows
 
 
