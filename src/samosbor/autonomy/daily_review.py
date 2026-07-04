@@ -13,7 +13,6 @@ from ..autonomy.runner import runner_breakeven_stop, runner_extreme_price, runne
 from ..config import AppConfig
 from ..domain import Candle, Instrument, PortfolioState, Signal, SignalDirection, TradeRecord
 from ..strategy.trend_following import TrendFollowingStrategy
-from .adaptive_entry import tracked_alternative_plan
 from .entry_confirmation import build_entry_confirmation_context
 from .ml_learning import assess_signal_learning, build_entry_candle_context
 
@@ -104,7 +103,6 @@ def build_daily_review_payload(
     weak_candidates.sort(key=lambda row: float(row["best_plan"]["net_pnl_per_lot_rub"]))
 
     grid_summary = _grid_summary(tradable_candidates)
-    grid_summary["tracked_alternative_plan"] = _tracked_alternative_plan_summary(grid_summary, config)
     recommendations = _daily_recommendations(
         actual_reviews,
         missed_opportunities,
@@ -701,61 +699,6 @@ def _grid_summary(candidates: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
-def _tracked_alternative_plan_summary(grid_summary: dict[str, object], config: AppConfig) -> dict[str, object]:
-    plan = tracked_alternative_plan(config.strategy)
-    if not plan["enabled"]:
-        return plan
-
-    grid_rows = list(grid_summary.get("grid_rows", []))
-    tracked = _grid_row_for_plan(
-        grid_rows,
-        entry_offset_bars=int(plan["entry_offset_bars"]),
-        stop_multiple=float(plan["stop_multiple"]),
-        reward_to_risk=float(plan["reward_to_risk"]),
-    )
-    current = min(
-        grid_rows,
-        key=lambda row: (
-            abs(int(row["entry_offset_bars"])),
-            abs(float(row["stop_multiple"]) - config.strategy.atr_stop_multiple),
-            abs(float(row["reward_to_risk"]) - config.strategy.reward_to_risk),
-        ),
-        default=None,
-    )
-    result = {
-        **plan,
-        "candidate": tracked,
-        "current_like": current,
-    }
-    if tracked is not None and current is not None:
-        result["delta_avg_net_pnl_per_lot_rub"] = round(
-            float(tracked["avg_net_pnl_per_lot_rub"]) - float(current["avg_net_pnl_per_lot_rub"]),
-            2,
-        )
-        result["delta_win_rate_pct"] = round(
-            float(tracked["win_rate_pct"]) - float(current["win_rate_pct"]),
-            3,
-        )
-    return result
-
-
-def _grid_row_for_plan(
-    grid_rows: list[dict[str, object]],
-    *,
-    entry_offset_bars: int,
-    stop_multiple: float,
-    reward_to_risk: float,
-) -> dict[str, object] | None:
-    for row in grid_rows:
-        if (
-            int(row["entry_offset_bars"]) == entry_offset_bars
-            and abs(float(row["stop_multiple"]) - stop_multiple) < 1e-9
-            and abs(float(row["reward_to_risk"]) - reward_to_risk) < 1e-9
-        ):
-            return row
-    return None
-
-
 def _grid_group_rows(plans: list[dict[str, object]]) -> list[dict[str, object]]:
     grouped: dict[tuple[object, object, object], list[dict[str, object]]] = defaultdict(list)
     for plan in plans:
@@ -1135,34 +1078,6 @@ def _render_markdown(payload: dict[str, object]) -> str:
             )
     else:
         lines.append("- No signal grid rows")
-
-    tracked = payload["grid_summary"].get("tracked_alternative_plan", {})
-    if isinstance(tracked, dict) and tracked.get("enabled"):
-        candidate = tracked.get("candidate")
-        current = tracked.get("current_like")
-        lines.extend(["", "## Tracked Paper Alternative"])
-        lines.append(
-            "- offset={entry_offset_bars}, stop={stop_multiple}, rr={reward_to_risk}, mode={mode}".format(
-                **tracked
-            )
-        )
-        if isinstance(candidate, dict):
-            lines.append(
-                "- candidate: {avg_net_pnl_per_lot_rub} RUB/lot, win {win_rate_pct}%, n={samples}".format(
-                    **candidate
-                )
-            )
-        if isinstance(current, dict):
-            lines.append(
-                "- current-like: {avg_net_pnl_per_lot_rub} RUB/lot, win {win_rate_pct}%, n={samples}".format(
-                    **current
-                )
-            )
-        if "delta_avg_net_pnl_per_lot_rub" in tracked:
-            lines.append(
-                f"- delta: {tracked['delta_avg_net_pnl_per_lot_rub']} RUB/lot, "
-                f"win {tracked.get('delta_win_rate_pct')} pp"
-            )
 
     lines.append("")
     lines.append("## Recommendations")

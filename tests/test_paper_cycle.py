@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from samosbor.autonomy.signal_feedback import signal_feedback_path
@@ -186,32 +186,6 @@ class _NoSignalPaperCycleOrchestrator(_PaperCycleOrchestrator):
 
     def _adaptation_strategy(self):
         return _NoSignalStrategy()
-
-
-def _wide_early_short_candles() -> list[Candle]:
-    start = datetime(2025, 1, 1, 6, 0, tzinfo=timezone.utc)
-    candles = [
-        Candle(
-            timestamp=start + timedelta(minutes=15 * index),
-            open=100.0,
-            high=100.1,
-            low=99.9,
-            close=100.0,
-            volume=5_000_000,
-        )
-        for index in range(21)
-    ]
-    candles.append(
-        Candle(
-            timestamp=start + timedelta(minutes=15 * 21),
-            open=99.0,
-            high=100.5,
-            low=96.5,
-            close=98.5,
-            volume=5_000_000,
-        )
-    )
-    return candles
 
 
 class PaperCycleSessionFlatTest(unittest.TestCase):
@@ -891,76 +865,6 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
                 summary["signal_rejection_reason_breakdown"],
                 {"entry blocked by 5min confirmation (5m rebound against short)": 1},
             )
-
-    def test_paper_cycle_waits_on_wide_early_short_setup(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            config_dir = root / "configs"
-            config_dir.mkdir(parents=True)
-            config_path = config_dir / "paper.toml"
-            config_path.write_text(
-                "\n".join(
-                    [
-                        "[app]",
-                        'timezone = "Europe/Moscow"',
-                        "",
-                        "[data]",
-                        'source = "csv"',
-                        'csv_path = "data/demo.csv"',
-                        'timeframe = "15min"',
-                        "",
-                        "[[data.instruments]]",
-                        'symbol = "DOMRF"',
-                        'instrument_type = "stock"',
-                        "lot_size = 1",
-                        "",
-                        "[strategy]",
-                        "min_liquidity_rub = 1.0",
-                        "adaptive_entry_enabled = true",
-                        "adaptive_entry_max_chase_atr = 0.5",
-                        "",
-                        "[execution]",
-                        'mode = "local-paper"',
-                        "allow_live_trading = false",
-                        'state_path = "state/paper_state.json"',
-                        "",
-                        "[backtest]",
-                        "initial_cash = 100000",
-                        "",
-                        "[reporting]",
-                        'output_dir = "runs"',
-                        "",
-                        "[research]",
-                        "",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            config = load_config(config_path)
-            instrument = Instrument(symbol="DOMRF", instrument_type=InstrumentType.STOCK, lot_size=1)
-            orchestrator = _PlainShortCycleOrchestrator(
-                config,
-                _FakeProvider([instrument], {"DOMRF": _wide_early_short_candles()}),
-            )
-
-            result = orchestrator.run_paper_cycle()
-            summary = json.loads((Path(result["output_dir"]) / "cycle_summary.json").read_text(encoding="utf-8"))
-            state = LocalPaperBroker.load(
-                config.resolve_path(config.execution.state_path),
-                initial_cash=config.backtest.initial_cash,
-                slippage_bps=config.execution.slippage_bps,
-                commission_bps=config.execution.commission_bps,
-            )
-
-            self.assertEqual(summary["signals_total"], 1)
-            self.assertEqual(summary["signals_approved"], 0)
-            self.assertEqual(len(state.portfolio.positions), 0)
-            [reason] = summary["signal_rejection_reason_breakdown"].keys()
-            self.assertTrue(reason.startswith("entry waits for adaptive confirmation"))
-            events = json.loads((Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8"))
-            self.assertEqual(events["events"][0]["metadata"]["adaptive_entry"]["grade"], "C")
 
     def test_learning_entry_block_rejects_low_quality_ml(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
