@@ -1218,6 +1218,8 @@ class TradingOrchestrator:
                             quantity_lots=decision.quantity_lots,
                         )
                         microstructure_block_reason = self._microstructure_block_reason(signal_for_entry)
+                        if microstructure_block_reason is None:
+                            microstructure_block_reason = self._learning_entry_block_reason(signal_for_entry)
 
                 event = {
                     "timestamp": latest.timestamp.isoformat(),
@@ -1353,6 +1355,27 @@ class TradingOrchestrator:
             commission_bps=self.config.execution.commission_bps,
         )
         return replace(signal, metadata=metadata)
+
+    def _learning_entry_block_reason(self, signal) -> str | None:
+        learning = signal.metadata.get("ml_learning", {})
+        if not isinstance(learning, dict):
+            return None
+        if not learning.get("available") or not learning.get("blocks_entry"):
+            return None
+
+        probability = learning.get("probability_profit")
+        expected = learning.get("expected_pnl_position_rub")
+        required = learning.get("required_net_edge_rub")
+        parts = []
+        if probability is not None:
+            parts.append(f"p={float(probability):.2f}")
+        if expected is not None:
+            parts.append(f"expected={float(expected):.2f} RUB")
+        if required is not None:
+            parts.append(f"required={float(required):.2f} RUB")
+        details = ", ".join(parts)
+        suffix = f" ({details})" if details else ""
+        return f"entry blocked by ML negative edge{suffix}"
 
     def _take_profit_activates_runner(self, broker, symbol: str, position, candle) -> bool:
         if not self.config.strategy.take_profit_activates_runner:

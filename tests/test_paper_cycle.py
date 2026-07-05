@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -95,6 +96,20 @@ class _EntrySignalStrategy(_BlockedSignalStrategy):
 class _EntrySignalCycleOrchestrator(_PaperCycleOrchestrator):
     def _strategy(self):
         return _EntrySignalStrategy()
+
+
+class _MlBlockedCycleOrchestrator(_EntrySignalCycleOrchestrator):
+    def _signal_with_learning_assessment(self, signal, feedback_payload, *, timestamp, quantity_lots):
+        metadata = dict(signal.metadata)
+        metadata["ml_learning"] = {
+            "available": True,
+            "blocks_entry": True,
+            "probability_profit": 0.16,
+            "expected_pnl_position_rub": -50.0,
+            "required_net_edge_rub": 20.0,
+            "learning_tags": ["low-quality-learning", "negative-expectancy-learning"],
+        }
+        return replace(signal, metadata=metadata)
 
 
 class _ShortExhaustionSignalStrategy(_EntrySignalStrategy):
@@ -647,6 +662,82 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
             self.assertEqual(
                 summary["signal_rejection_reason_breakdown"],
                 {"entry blocked by wide spread (20.00 bps)": 1},
+            )
+
+    def test_paper_cycle_blocks_entry_when_ml_edge_is_negative(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_dir = root / "configs"
+            config_dir.mkdir(parents=True)
+            config_path = config_dir / "paper.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[app]",
+                        'timezone = "Europe/Moscow"',
+                        "",
+                        "[data]",
+                        'source = "csv"',
+                        'csv_path = "data/demo.csv"',
+                        'timeframe = "30min"',
+                        "",
+                        "[[data.instruments]]",
+                        'symbol = "SBER"',
+                        'instrument_type = "stock"',
+                        "lot_size = 1",
+                        "",
+                        "[strategy]",
+                        "min_liquidity_rub = 1.0",
+                        "",
+                        "[execution]",
+                        'mode = "local-paper"',
+                        "allow_live_trading = false",
+                        'state_path = "state/paper_state.json"',
+                        "",
+                        "[backtest]",
+                        "initial_cash = 100000",
+                        "",
+                        "[reporting]",
+                        'output_dir = "runs"',
+                        "",
+                        "[research]",
+                        "",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            latest_candle = Candle(
+                timestamp=datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc),
+                open=100.0,
+                high=101.0,
+                low=99.8,
+                close=100.7,
+                volume=5_000_000,
+            )
+            orchestrator = _MlBlockedCycleOrchestrator(
+                config,
+                _FakeProvider([instrument], {"SBER": [latest_candle]}),
+            )
+
+            result = orchestrator.run_paper_cycle()
+            summary = json.loads((Path(result["output_dir"]) / "cycle_summary.json").read_text(encoding="utf-8"))
+            state = LocalPaperBroker.load(
+                config.resolve_path(config.execution.state_path),
+                initial_cash=config.backtest.initial_cash,
+                slippage_bps=config.execution.slippage_bps,
+                commission_bps=config.execution.commission_bps,
+            )
+
+            self.assertEqual(summary["signals_total"], 1)
+            self.assertEqual(summary["signals_approved"], 0)
+            self.assertEqual(len(state.portfolio.positions), 0)
+            self.assertEqual(
+                summary["signal_rejection_reason_breakdown"],
+                {"entry blocked by ML negative edge (p=0.16, expected=-50.00 RUB, required=20.00 RUB)": 1},
             )
 
     def test_paper_cycle_observes_short_exhaustion_without_blocking_entry(self):
