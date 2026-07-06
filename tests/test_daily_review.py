@@ -96,6 +96,7 @@ def test_daily_review_finds_missed_positive_candidates(tmp_path: Path):
     )
 
     assert payload["signal_scan"]["candidate_signals"] > 0
+    assert "commit_hash" in payload
     assert payload["signal_scan"]["missed_positive_opportunities"] > 0
     assert payload["training_examples"]
     first = payload["missed_opportunities"][0]
@@ -140,6 +141,7 @@ def test_daily_review_reviews_actual_trade_and_writes_files(tmp_path: Path):
     assert (output_dir / "daily_review.json").exists()
     assert (output_dir / "daily_review.md").exists()
     assert (output_dir / "training_examples.csv").exists()
+    assert "Commit:" in (output_dir / "daily_review.md").read_text(encoding="utf-8")
     assert str(daily_review_path(Path("state/paper_state.json"))).replace("\\", "/") == (
         "state/paper_state_daily_review.json"
     )

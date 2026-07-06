@@ -1074,7 +1074,16 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
             result = orchestrator.run_paper_cycle()
             summary_path = Path(result["output_dir"]) / "cycle_summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )
+            review = json.loads(
+                trade_review_path(config.resolve_path(config.execution.state_path)).read_text(encoding="utf-8")
+            )
 
+            self.assertIn("commit_hash", summary)
+            self.assertEqual(cycle_events["commit_hash"], summary["commit_hash"])
+            self.assertEqual(review["commit_hash"], summary["commit_hash"])
             self.assertEqual(summary["signals_total"], 1)
             self.assertEqual(summary["signals_approved"], 0)
             self.assertEqual(summary["signals_rejected"], 1)

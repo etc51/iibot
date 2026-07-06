@@ -4,6 +4,8 @@ import json
 import math
 from pathlib import Path
 
+from ..runtime_metadata import with_runtime_metadata
+
 
 def build_universe_selection_tuning_payload(
     *,
@@ -204,6 +206,7 @@ def build_universe_selection_tuning_payload(
 
 
 def write_universe_selection_tuning(output_dir: Path, payload: dict[str, object]) -> None:
+    payload = with_runtime_metadata(payload)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "universe_selection.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -235,6 +238,7 @@ def _render_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Runtime Universe Tuning",
         "",
+        f"- Commit: {payload.get('commit_hash', 'unknown')}",
         f"- Configured symbols: {payload['configured_symbols']}",
         f"- Current allowed symbols: {payload['current_allowed_symbols']}",
         f"- Current effective symbols: {payload['current_effective_symbols']}",

@@ -62,6 +62,7 @@ def test_trade_review_classifies_errors_and_recommends_patches():
     )
 
     assert payload["reviewed_trades"] == 2
+    assert "commit_hash" in payload
     assert payload["summary"]["mistake_trades"] == 2
     assert payload["mistake_breakdown"]["stop-loss"] == 2
     assert payload["mistake_breakdown"]["weak-signal-loss"] == 2

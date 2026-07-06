@@ -117,6 +117,7 @@ from .research.walk_forward import (
     _trim_backtest_result,
 )
 from .risk.manager import RiskManager
+from .runtime_metadata import add_runtime_metadata
 from .safety import assert_paper_only_mode
 from .strategy.trend_following import TrendFollowingStrategy
 from .backtest.engine import BacktestEngine
@@ -282,6 +283,7 @@ class TradingOrchestrator:
         )
         _, _, candles_by_symbol, instruments_by_symbol = self._load_market_bundle()
         result, summary = self._run_backtest_bundle(candles_by_symbol, instruments_by_symbol)
+        add_runtime_metadata(summary)
 
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         output_dir = self.config.resolve_path(self.config.reporting.output_dir) / "backtests" / stamp
@@ -306,6 +308,7 @@ class TradingOrchestrator:
             commission_bps=self.config.execution.commission_bps,
         )
         payload = optimizer.run(candles_by_symbol, instruments_by_symbol)
+        add_runtime_metadata(payload)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         output_dir = self.config.resolve_path(self.config.reporting.output_dir) / "optimizer" / stamp
         write_optimizer_report(output_dir, payload)
@@ -334,6 +337,7 @@ class TradingOrchestrator:
             "target": effective_target_payload(self.config.research, self.config.backtest),
             "monte_carlo": simulator.run(result),
         }
+        add_runtime_metadata(payload)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         output_dir = self.config.resolve_path(self.config.reporting.output_dir) / "monte-carlo" / stamp
         write_monte_carlo_report(output_dir, payload)
@@ -367,6 +371,7 @@ class TradingOrchestrator:
                     "research_window": research_window,
                     "reason": research_window["reason"],
                 }
+                add_runtime_metadata(payload)
                 stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
                 output_dir = self.config.resolve_path(self.config.reporting.output_dir) / "walk-forward" / stamp
                 write_walk_forward_report(output_dir, payload)
@@ -385,6 +390,7 @@ class TradingOrchestrator:
         payload = validator.run(candles_by_symbol, instruments_by_symbol)
         if research_window is not None:
             payload["research_window"] = research_window
+        add_runtime_metadata(payload)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         output_dir = self.config.resolve_path(self.config.reporting.output_dir) / "walk-forward" / stamp
         write_walk_forward_report(output_dir, payload)
@@ -419,6 +425,7 @@ class TradingOrchestrator:
                 "changed": False,
                 "reason": research_window["reason"],
             }
+            add_runtime_metadata(payload)
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
             output_dir = self._autotune_dir() / "strategy" / stamp
             write_json_payload(output_dir / "strategy_tuning.json", payload)
@@ -473,6 +480,7 @@ class TradingOrchestrator:
             min_positive_fold_probability_pct=min_positive_fold_probability_pct,
         )
         payload["latest_fold"] = latest_fold
+        add_runtime_metadata(payload)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         output_dir = self._autotune_dir() / "strategy" / stamp
         write_strategy_tuning(output_dir, payload)
@@ -506,6 +514,7 @@ class TradingOrchestrator:
                 "changed": False,
                 "reason": research_window["reason"],
             }
+            add_runtime_metadata(payload)
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
             output_dir = self._autotune_dir() / "exits" / stamp
             write_json_payload(output_dir / "exit_tuning.json", payload)
@@ -568,6 +577,7 @@ class TradingOrchestrator:
             min_positive_fold_probability_pct=min_positive_fold_probability_pct,
         )
         payload["latest_fold"] = latest_fold
+        add_runtime_metadata(payload)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         output_dir = self._autotune_dir() / "exits" / stamp
         write_exit_tuning(output_dir, payload)
@@ -685,6 +695,7 @@ class TradingOrchestrator:
             max_hours_to_remove=max_hours_to_remove,
         )
         payload["evidence_counts"] = trade_evidence["evidence_counts"]
+        add_runtime_metadata(payload)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         output_dir = self._autotune_dir() / "entry-schedule" / stamp
         write_entry_schedule_tuning(output_dir, payload)
@@ -715,6 +726,7 @@ class TradingOrchestrator:
             bucket_step=bucket_step,
         )
         payload["evidence_counts"] = trade_evidence["evidence_counts"]
+        add_runtime_metadata(payload)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         output_dir = self._autotune_dir() / "entry-quality" / stamp
         write_entry_quality_tuning(output_dir, payload)
@@ -760,6 +772,7 @@ class TradingOrchestrator:
             runtime_symbols=[instrument.symbol for instrument in self.config.data.instruments],
         )
         payload["evidence_counts"] = trade_evidence["evidence_counts"]
+        add_runtime_metadata(payload)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         output_dir = self._autotune_dir() / "entry-symbols" / stamp
         write_entry_symbol_tuning(output_dir, payload)
@@ -802,6 +815,7 @@ class TradingOrchestrator:
             min_latest_fold_trades=min_latest_fold_trades,
             require_optimizer_overlap=require_optimizer_overlap,
         )
+        add_runtime_metadata(payload)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         output_dir = self._autotune_dir() / "universe-selection" / stamp
         write_universe_selection_tuning(output_dir, payload)
@@ -859,6 +873,7 @@ class TradingOrchestrator:
             "pending_signals": len(payload.get("pending", [])),
             "resolved_signals": len(payload.get("resolved", [])),
         }
+        add_runtime_metadata(result)
         write_json_payload(output_dir / "bootstrap_summary.json", result)
         result["output_dir"] = str(output_dir)
         return result
@@ -918,6 +933,7 @@ class TradingOrchestrator:
             "sources": sources,
             "rollback_guardrail": guardrail,
         }
+        add_runtime_metadata(result)
         write_json_payload(output_dir / "effective_config.json", result)
         result["output_dir"] = str(output_dir)
         return result
@@ -1016,6 +1032,7 @@ class TradingOrchestrator:
                 "effective_config": _effective_config_view(effective_config_result),
             },
         }
+        add_runtime_metadata(result)
         write_json_payload(output_dir / "nightly_autonomy.json", result)
         (output_dir / "summary.md").write_text(_render_nightly_autonomy_markdown(result), encoding="utf-8")
         result["output_dir"] = str(output_dir)
@@ -1404,6 +1421,7 @@ class TradingOrchestrator:
         latest_trade_review_path = trade_review_path(state_path)
         save_trade_review(latest_trade_review_path, trade_review)
         trade_review["latest_path"] = str(latest_trade_review_path)
+        add_runtime_metadata(trade_review)
         signal_activity = _summarize_signal_activity(cycle_events)
         stamp = timestamp.strftime("%Y%m%d-%H%M%S")
         output_dir = self.config.resolve_path(self.config.reporting.output_dir) / "paper" / stamp
@@ -1419,8 +1437,11 @@ class TradingOrchestrator:
             "trade_review": _trade_review_view(trade_review),
             **signal_activity,
         }
+        add_runtime_metadata(summary)
+        cycle_events_payload = {"events": cycle_events}
+        add_runtime_metadata(cycle_events_payload)
         write_json_payload(output_dir / "cycle_summary.json", summary)
-        write_json_payload(output_dir / "cycle_events.json", {"events": cycle_events})
+        write_json_payload(output_dir / "cycle_events.json", cycle_events_payload)
         write_trade_review(output_dir, trade_review)
         write_portfolio_snapshot(output_dir / "portfolio.json", broker.portfolio)
         return {"summary": summary, "output_dir": str(output_dir)}
@@ -2832,6 +2853,7 @@ def _render_nightly_autonomy_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Nightly Autonomy",
         "",
+        f"- Commit: {payload.get('commit_hash', 'unknown')}",
         f"- Active config: {payload['active_config_path']}",
         f"- Base config: {payload['base_config_path']}",
         f"- Effective output: {payload['effective_output_path']}",

@@ -10,6 +10,7 @@ from typing import Iterable
 from zoneinfo import ZoneInfo
 
 from ..domain import PortfolioState, Position, TradeRecord
+from ..runtime_metadata import with_runtime_metadata
 
 
 def build_paper_report_payload(
@@ -42,7 +43,7 @@ def build_paper_report_payload(
     current_portfolio = _portfolio_snapshot(portfolio)
     current_positions = _open_positions(portfolio.positions.values(), timezone=timezone)
 
-    return {
+    return with_runtime_metadata({
         "period": {
             "timezone": timezone_name,
             "days": days,
@@ -64,10 +65,11 @@ def build_paper_report_payload(
         "best_trades": _trade_rows(sorted(current_trades, key=lambda trade: trade.net_pnl, reverse=True)[:3]),
         "worst_trades": _trade_rows(sorted(current_trades, key=lambda trade: trade.net_pnl)[:3]),
         "open_positions": current_positions,
-    }
+    })
 
 
 def write_paper_report(output_dir: Path, payload: dict[str, object]) -> None:
+    payload = with_runtime_metadata(payload)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "summary.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -334,6 +336,7 @@ def _render_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Samosbor Paper Report",
         "",
+        f"- Commit: {payload.get('commit_hash', 'unknown')}",
         f"- Period: {period['start_at']} .. {period['end_at']} ({period['timezone']})",
         f"- Net PnL: {summary['net_pnl_rub']} RUB",
         f"- Trades: {summary['trades']}",

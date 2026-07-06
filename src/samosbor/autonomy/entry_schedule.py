@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..domain import PortfolioState, TradeRecord
 from ..reporting.paper_report import build_paper_report_payload
+from ..runtime_metadata import with_runtime_metadata
 
 
 def build_entry_schedule_tuning_payload(
@@ -142,6 +143,7 @@ def build_entry_schedule_tuning_payload(
 
 
 def write_entry_schedule_tuning(output_dir: Path, payload: dict[str, object]) -> None:
+    payload = with_runtime_metadata(payload)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "schedule_tuning.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -176,6 +178,7 @@ def _render_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Entry Schedule Tuning",
         "",
+        f"- Commit: {payload.get('commit_hash', 'unknown')}",
         f"- Lookback: {payload['analysis_window']['days']} day(s)",
         f"- Evidence source: {payload['evidence_source']}",
         f"- Current hours: {payload['current_hours']}",

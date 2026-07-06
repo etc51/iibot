@@ -11,6 +11,7 @@ from .config import AppConfig
 from .data.tbank import TBankMarketDataProvider
 from .domain import Instrument
 from .reporting.writer import write_json_payload
+from .runtime_metadata import current_commit_hash
 
 
 class OrderBookProvider(Protocol):
@@ -64,6 +65,7 @@ def collect_microstructure_snapshot(
 
     payload = {
         "generated_at": collected_at.isoformat(),
+        "commit_hash": current_commit_hash(),
         "output_dir": str(output_root),
         "depth": normalized_depth,
         "symbols_total": len(config.data.instruments),

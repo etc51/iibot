@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from ..config import RiskSection, StrategySection
 from ..domain import PortfolioState, TradeRecord
+from ..runtime_metadata import with_runtime_metadata
 from .ml_learning import (
     COMMISSION_EDGE_TAG,
     CONFIRMATION_AFTER_IMPULSE_TAG,
@@ -58,7 +59,7 @@ def build_trade_review_payload(
         risk=risk,
     )
     summary = _summary(reviews)
-    return {
+    return with_runtime_metadata({
         "generated_at": generated_at.isoformat(),
         "timezone": timezone_name,
         "lookback_trades": lookback_trades,
@@ -97,15 +98,17 @@ def build_trade_review_payload(
         "recommendations": recommendations["items"],
         "config_patch_candidates": recommendations["config_patch_candidates"],
         "reviews": reviews,
-    }
+    })
 
 
 def save_trade_review(path: Path, payload: dict[str, object]) -> None:
+    payload = with_runtime_metadata(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def write_trade_review(output_dir: Path, payload: dict[str, object]) -> None:
+    payload = with_runtime_metadata(payload)
     output_dir.mkdir(parents=True, exist_ok=True)
     save_trade_review(output_dir / "trade_review.json", payload)
     (output_dir / "trade_review.md").write_text(_render_markdown(payload), encoding="utf-8")
@@ -1685,6 +1688,7 @@ def _render_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Trade Review",
         "",
+        f"- Commit: {payload.get('commit_hash', 'unknown')}",
         f"- Reviewed trades: {payload.get('reviewed_trades', 0)}",
         f"- Net PnL: {summary.get('net_pnl_rub', 0.0)} RUB",
         f"- Win rate: {summary.get('win_rate_pct', 0.0)}%",

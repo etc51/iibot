@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..config import BacktestSection, ResearchSection, StrategySection
 from ..research.targets import effective_target_payload, render_target_label
+from ..runtime_metadata import with_runtime_metadata
 
 
 def adapt_strategy_tuning_research(
@@ -146,6 +147,7 @@ def build_strategy_tuning_payload(
 
 
 def write_strategy_tuning(output_dir: Path, payload: dict[str, object]) -> None:
+    payload = with_runtime_metadata(payload)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "strategy_tuning.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -211,6 +213,7 @@ def _render_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Strategy Tuning",
         "",
+        f"- Commit: {payload.get('commit_hash', 'unknown')}",
         f"- Target: {render_target_label(payload['target'])}",
         f"- Changed: {payload['changed']}",
         f"- Reason: {payload['reason']}",

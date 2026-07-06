@@ -60,6 +60,7 @@ def test_collect_microstructure_snapshot_writes_all_configured_instruments(tmp_p
     )
 
     assert provider.calls == [("SBER", 10), ("MTLR", 10)]
+    assert "commit_hash" in payload
     assert payload["symbols_total"] == 2
     assert payload["symbols_ok"] == 2
     assert payload["symbols_error"] == 0
@@ -74,6 +75,7 @@ def test_collect_microstructure_snapshot_writes_all_configured_instruments(tmp_p
     assert sber_row["spread_bps"] == 9.995
 
     latest = json.loads(microstructure_latest_path(config).read_text(encoding="utf-8"))
+    assert latest["commit_hash"] == payload["commit_hash"]
     assert latest["rows"]["MTLR"]["best_bid"] == 100.0
 
 

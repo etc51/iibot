@@ -74,6 +74,7 @@ class PaperReportTest(unittest.TestCase):
         )
 
         self.assertEqual(payload["summary"]["trades"], 2)
+        self.assertIn("commit_hash", payload)
         self.assertEqual(payload["summary"]["net_pnl_rub"], 50.0)
         self.assertEqual(payload["summary"]["win_rate_pct"], 50.0)
         self.assertEqual(len(payload["closed_trades"]), 2)
@@ -88,6 +89,7 @@ class PaperReportTest(unittest.TestCase):
             self.assertTrue((output_dir / "summary.json").exists())
             self.assertTrue((output_dir / "summary.md").exists())
             self.assertTrue((output_dir / "trades.csv").exists())
+            self.assertIn("Commit:", (output_dir / "summary.md").read_text(encoding="utf-8"))
 
 
 class EntryScheduleAutonomyTest(unittest.TestCase):

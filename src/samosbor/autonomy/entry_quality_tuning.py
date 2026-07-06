@@ -7,6 +7,7 @@ from pathlib import Path
 from ..config import BacktestSection, ResearchSection
 from ..domain import TradeRecord
 from ..research.targets import effective_target_payload, render_target_label
+from ..runtime_metadata import with_runtime_metadata
 
 
 def build_signal_strength_breakdown(
@@ -211,6 +212,7 @@ def build_entry_quality_tuning_payload(
 
 
 def write_entry_quality_tuning(output_dir: Path, payload: dict[str, object]) -> None:
+    payload = with_runtime_metadata(payload)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "entry_quality_tuning.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -297,6 +299,7 @@ def _render_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Entry Quality Tuning",
         "",
+        f"- Commit: {payload.get('commit_hash', 'unknown')}",
         f"- Target: {render_target_label(payload['target'])}",
         f"- Evidence source: {payload['evidence_source']}",
         f"- Evidence counts: {_render_evidence_counts(payload.get('evidence_counts', {}))}",

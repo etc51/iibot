@@ -18,6 +18,7 @@ from .autonomy.trade_review import trade_review_path
 from .config import load_config
 from .data.tbank import TBankMarketDataProvider
 from .domain import ExitReason, Instrument, InstrumentType
+from .runtime_metadata import current_commit_hash
 
 _LIVE_PRICE_CACHE_TTL_SECONDS = 60.0
 _LIVE_PRICE_CACHE_LOCK = Lock()
@@ -53,6 +54,7 @@ def build_minimal_dashboard_payload(config_path: str | Path) -> dict[str, object
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "commit_hash": current_commit_hash(),
         "host": _local_ip(),
         "config": {
             "path": str(Path(config_path).resolve()),
@@ -194,7 +196,7 @@ def render_minimal_dashboard_html(payload: dict[str, object]) -> str:
   <header>
     <div>
       <h1>MOEX AI Trader</h1>
-      <div class="sub">Generated {_escape(_fmt_time(str(payload["generated_at"])))} | auto refresh 5s</div>
+      <div class="sub">Generated {_escape(_fmt_time(str(payload["generated_at"])))} | commit {_escape(str(payload.get("commit_hash", "unknown"))[:12])} | auto refresh 5s</div>
     </div>
     <div class="pillbar">
       <span class="pill {status_tone}">loop {_escape(str(loop.get("status", "unknown")))}</span>

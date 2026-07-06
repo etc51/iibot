@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from .autonomy.signal_feedback import signal_feedback_path
 from .config import StrategySection, load_config
+from .runtime_metadata import current_commit_hash
 
 
 def build_dashboard_payload(
@@ -94,6 +95,7 @@ def build_dashboard_payload(
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "commit_hash": current_commit_hash(),
         "config": {
             "config_path": str(Path(config_path).resolve()),
             "effective_config_path": (
@@ -707,6 +709,7 @@ def render_dashboard_html(payload: dict[str, object]) -> str:
         <div class="status-kicker">Runtime Snapshot</div>
         <div class="status-line">{_escape(str(config["account_name"]))} | {_escape(str(config["paper_only_mode"]))}</div>
         <div class="status-meta">
+          Commit: <span class="mono">{_escape(str(payload.get("commit_hash", "unknown"))[:12])}</span><br/>
           Последний цикл: <span class="mono">{_escape(_fmt_timestamp(str(latest_cycle.get("timestamp", ""))))}</span><br/>
           Ночной цикл: <span class="mono">{_escape(_fmt_timestamp(str(nightly_autonomy.get("timestamp", ""))))}</span><br/>
           Автообновление каждые 15 секунд

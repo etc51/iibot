@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 from ..domain import BacktestResult, PortfolioState
+from ..runtime_metadata import with_runtime_metadata
 
 
 def write_backtest_report(
@@ -15,7 +16,7 @@ def write_backtest_report(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "summary.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2),
+        json.dumps(with_runtime_metadata(summary), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     _write_trades(output_dir / "trades.csv", result)
@@ -31,7 +32,7 @@ def write_portfolio_snapshot(path: Path, portfolio: PortfolioState) -> None:
 
 def write_json_payload(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(with_runtime_metadata(payload), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _write_trades(path: Path, result: BacktestResult) -> None:

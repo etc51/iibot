@@ -133,6 +133,8 @@ class DashboardTest(unittest.TestCase):
             payload = build_dashboard_payload(config_path)
             html = render_dashboard_html(payload)
 
+            self.assertIn("commit_hash", payload)
+            self.assertIn("Commit:", html)
             self.assertEqual([row["symbol"] for row in payload["runtime"]["positions"]], ["SBER"])
             position = payload["runtime"]["positions"][0]
             self.assertEqual(position["trailing_status"], "active")

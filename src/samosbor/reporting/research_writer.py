@@ -4,8 +4,11 @@ import csv
 import json
 from pathlib import Path
 
+from ..runtime_metadata import with_runtime_metadata
+
 
 def write_optimizer_report(output_dir: Path, payload: dict[str, object]) -> None:
+    payload = with_runtime_metadata(payload)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "optimizer.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -66,6 +69,7 @@ def write_optimizer_report(output_dir: Path, payload: dict[str, object]) -> None
 
 
 def write_monte_carlo_report(output_dir: Path, payload: dict[str, object]) -> None:
+    payload = with_runtime_metadata(payload)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "monte_carlo.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -74,6 +78,7 @@ def write_monte_carlo_report(output_dir: Path, payload: dict[str, object]) -> No
 
 
 def write_walk_forward_report(output_dir: Path, payload: dict[str, object]) -> None:
+    payload = with_runtime_metadata(payload)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "walk_forward.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),

@@ -12,6 +12,7 @@ from ..analysis.indicators import atr
 from ..autonomy.runner import runner_breakeven_stop, runner_extreme_price, runner_trailing_stop
 from ..config import AppConfig
 from ..domain import Candle, Instrument, PortfolioState, Signal, SignalDirection, TradeRecord
+from ..runtime_metadata import with_runtime_metadata
 from ..strategy.trend_following import TrendFollowingStrategy
 from .entry_confirmation import build_entry_confirmation_context
 from .ml_learning import assess_signal_learning, build_entry_candle_context
@@ -111,7 +112,7 @@ def build_daily_review_payload(
     )
     training_examples = _training_examples(candidates, actual_reviews)
 
-    return {
+    return with_runtime_metadata({
         "generated_at": generated_at.isoformat(),
         "period": {
             "timezone": config.app.timezone,
@@ -165,15 +166,17 @@ def build_daily_review_payload(
         "recommendations": recommendations,
         "training_examples": training_examples[:500],
         "candidate_signals": [_public_candidate(row) for row in _rank_candidates(candidates)[:max_signal_rows]],
-    }
+    })
 
 
 def save_daily_review(path: Path, payload: dict[str, object]) -> None:
+    payload = with_runtime_metadata(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def write_daily_review(output_dir: Path, payload: dict[str, object]) -> None:
+    payload = with_runtime_metadata(payload)
     output_dir.mkdir(parents=True, exist_ok=True)
     save_daily_review(output_dir / "daily_review.json", payload)
     (output_dir / "daily_review.md").write_text(_render_markdown(payload), encoding="utf-8")
@@ -1056,6 +1059,7 @@ def _render_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Daily Review",
         "",
+        f"- Commit: {payload.get('commit_hash', 'unknown')}",
         f"- Period: {payload['period']['start_at']} .. {payload['period']['end_at']} ({payload['period']['timezone']})",
         f"- Opened trades: {actual['opened_trades']}",
         f"- Net PnL opened: {opened['net_pnl_rub']} RUB",
