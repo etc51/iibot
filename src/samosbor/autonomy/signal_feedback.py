@@ -16,17 +16,19 @@ def signal_feedback_path(state_path: Path) -> Path:
     return state_path.with_name(f"{state_path.stem}_signal_feedback{suffix}")
 
 
-def load_signal_feedback(path: Path) -> dict[str, list[dict[str, object]]]:
+def load_signal_feedback(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {"pending": [], "resolved": []}
+        return {"pending": [], "resolved": [], "pending_entries": [], "shadow_rejected": []}
     payload = json.loads(path.read_text(encoding="utf-8"))
     return {
         "pending": list(payload.get("pending", [])),
         "resolved": list(payload.get("resolved", [])),
+        "pending_entries": list(payload.get("pending_entries", [])),
+        "shadow_rejected": list(payload.get("shadow_rejected", [])),
     }
 
 
-def save_signal_feedback(path: Path, payload: dict[str, list[dict[str, object]]]) -> None:
+def save_signal_feedback(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -80,6 +82,96 @@ def record_shadow_signal(
             runner_atr_window=runner_atr_window,
         )
     )
+
+
+def record_rejected_shadow_signal(
+    payload: dict[str, list[dict[str, object]]],
+    signal: Signal,
+    *,
+    timestamp: datetime,
+    horizon_bars: int,
+    quantity_lots: int = 1,
+    rejection_reason: str = "",
+    decision_type: str = "",
+    slippage_bps: float = 0.0,
+    commission_bps: float = 0.0,
+    runner_enabled: bool = False,
+    runner_breakeven_buffer_bps: float = 0.0,
+    runner_trailing_atr_multiple: float = 0.0,
+    runner_profit_lock_ratio: float = 0.0,
+    runner_atr_window: int = 14,
+) -> str:
+    shadow_id = _shadow_signal_id(signal, timestamp=timestamp)
+    signature = (
+        signal.instrument.symbol,
+        signal.direction.value,
+        timestamp.isoformat(),
+    )
+    metadata = {
+        **dict(signal.metadata),
+        "shadow_trade_id": shadow_id,
+        "shadow_type": "policy_rejected",
+        "policy_rejection_reason": rejection_reason,
+        "policy_decision_type": decision_type,
+    }
+    for collection_name in ("pending", "resolved"):
+        for item in payload.get(collection_name, []):
+            existing_signature = (
+                item["symbol"],
+                item["direction"],
+                item["created_at"],
+            )
+            if existing_signature != signature:
+                continue
+            existing_metadata = dict(item.get("metadata", {}))
+            item["metadata"] = _json_ready({**existing_metadata, **metadata})
+            item["shadow_type"] = "policy_rejected"
+            item["policy_rejection_reason"] = rejection_reason
+            item["policy_decision_type"] = decision_type
+            item["shadow_trade_id"] = shadow_id
+            return shadow_id
+
+    item = _shadow_signal_item(
+        Signal(
+            instrument=signal.instrument,
+            direction=signal.direction,
+            strength=signal.strength,
+            entry_price=signal.entry_price,
+            stop_price=signal.stop_price,
+            take_profit=signal.take_profit,
+            reason=signal.reason,
+            context_score=signal.context_score,
+            metadata=metadata,
+        ),
+        timestamp=timestamp,
+        horizon_bars=horizon_bars,
+        quantity_lots=max(1, int(quantity_lots or 1)),
+        slippage_bps=slippage_bps,
+        commission_bps=commission_bps,
+        runner_enabled=runner_enabled,
+        runner_breakeven_buffer_bps=runner_breakeven_buffer_bps,
+        runner_trailing_atr_multiple=runner_trailing_atr_multiple,
+        runner_profit_lock_ratio=runner_profit_lock_ratio,
+        runner_atr_window=runner_atr_window,
+    )
+    item["shadow_type"] = "policy_rejected"
+    item["policy_rejection_reason"] = rejection_reason
+    item["policy_decision_type"] = decision_type
+    item["shadow_trade_id"] = shadow_id
+    payload.setdefault("pending", []).append(item)
+    payload.setdefault("shadow_rejected", []).append(
+        {
+            "shadow_trade_id": shadow_id,
+            "symbol": signal.instrument.symbol,
+            "direction": signal.direction.value,
+            "created_at": timestamp.isoformat(),
+            "decision_type": decision_type,
+            "reason": rejection_reason,
+            "status": "pending_virtual_outcome",
+            "metadata": _json_ready(metadata),
+        }
+    )
+    return shadow_id
 
 
 def resolve_pending_signals(
@@ -340,6 +432,17 @@ def _shadow_signal_item(
         "runner_profit_lock_ratio": float(runner_profit_lock_ratio),
         "runner_atr_window": int(runner_atr_window),
     }
+
+
+def _shadow_signal_id(signal: Signal, *, timestamp: datetime) -> str:
+    return "|".join(
+        [
+            "shadow",
+            signal.instrument.symbol,
+            signal.direction.value,
+            timestamp.isoformat(),
+        ]
+    )
 
 
 def _resolve_signal_item(item: dict[str, object], candles: list[Candle]) -> dict[str, object] | None:

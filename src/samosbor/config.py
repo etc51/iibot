@@ -126,6 +126,174 @@ class RiskSection:
 
 
 @dataclass(frozen=True)
+class LearningModeSection:
+    enabled: bool = False
+    profile: str = "strict"
+    record_strict_policy_shadow: bool = False
+    record_rejected_shadow: bool = False
+    allow_probe_trades: bool = True
+    allow_exploration_trades: bool = True
+    min_effective_risk_multiplier_to_trade: float = 0.05
+    allow_choppy_trend_short_probe: bool = True
+    choppy_trend_short_probe_min_signal_strength: float = 0.45
+    choppy_trend_short_default_mode: str = "wait_pullback"
+    allow_range_chop_exploration: bool = True
+
+
+@dataclass(frozen=True)
+class ModeRiskSection:
+    risk_multiplier: float = 1.0
+    max_positions: int = 0
+    max_trades_per_day: int = 0
+
+
+@dataclass(frozen=True)
+class LearningRiskSection:
+    normal: ModeRiskSection = field(default_factory=lambda: ModeRiskSection(risk_multiplier=1.0))
+    probe: ModeRiskSection = field(
+        default_factory=lambda: ModeRiskSection(
+            risk_multiplier=0.25,
+            max_positions=6,
+            max_trades_per_day=10,
+        )
+    )
+    exploration: ModeRiskSection = field(
+        default_factory=lambda: ModeRiskSection(
+            risk_multiplier=0.10,
+            max_positions=4,
+            max_trades_per_day=8,
+        )
+    )
+
+
+@dataclass(frozen=True)
+class ModeSignalSection:
+    min_signal_strength: float = 0.0
+    min_trend_strength: float = 0.0
+    adx_min: float = 0.0
+
+
+@dataclass(frozen=True)
+class LearningSignalsSection:
+    normal: ModeSignalSection = field(
+        default_factory=lambda: ModeSignalSection(
+            min_signal_strength=0.30,
+            min_trend_strength=0.002,
+            adx_min=20.0,
+        )
+    )
+    probe: ModeSignalSection = field(
+        default_factory=lambda: ModeSignalSection(
+            min_signal_strength=0.20,
+            min_trend_strength=0.001,
+            adx_min=16.0,
+        )
+    )
+    exploration: ModeSignalSection = field(
+        default_factory=lambda: ModeSignalSection(
+            min_signal_strength=0.12,
+            min_trend_strength=0.0005,
+            adx_min=12.0,
+        )
+    )
+
+
+@dataclass(frozen=True)
+class ModeMicrostructureSection:
+    max_entry_spread_bps: float = 0.0
+    min_entry_liquidity_cover: float = 0.0
+    min_entry_book_imbalance: float = -1.0
+
+
+@dataclass(frozen=True)
+class LearningMicrostructureSection:
+    normal: ModeMicrostructureSection = field(
+        default_factory=lambda: ModeMicrostructureSection(
+            max_entry_spread_bps=12.0,
+            min_entry_liquidity_cover=2.0,
+            min_entry_book_imbalance=-0.35,
+        )
+    )
+    probe: ModeMicrostructureSection = field(
+        default_factory=lambda: ModeMicrostructureSection(
+            max_entry_spread_bps=18.0,
+            min_entry_liquidity_cover=1.2,
+            min_entry_book_imbalance=-0.60,
+        )
+    )
+    exploration: ModeMicrostructureSection = field(
+        default_factory=lambda: ModeMicrostructureSection(
+            max_entry_spread_bps=25.0,
+            min_entry_liquidity_cover=0.8,
+            min_entry_book_imbalance=-0.80,
+        )
+    )
+
+
+@dataclass(frozen=True)
+class MlLearningPolicySection:
+    negative_edge_only_multiplier: float = 0.35
+    negative_edge_plus_one_soft_issue_multiplier: float = 0.15
+    negative_edge_plus_multiple_soft_issues_multiplier: float = 0.08
+    negative_edge_plus_hard_execution_issue: str = "reject"
+
+
+@dataclass(frozen=True)
+class Confirmation5mPolicySection:
+    neutral_confirmation_mode: str = "probe"
+    mild_rebound_against_short_mode: str = "exploration_or_wait"
+    strong_rebound_against_short_mode: str = "wait_pullback"
+    hard_block_rebound_against_short: bool = False
+    mild_adverse_ret: float = 0.0025
+    strong_adverse_ret: float = 0.005
+    extreme_adverse_ret: float = 0.012
+
+
+@dataclass(frozen=True)
+class LongSidePolicySection:
+    normal_enabled: bool = False
+    probe_enabled: bool = True
+    exploration_enabled: bool = True
+    probe_risk_multiplier: float = 0.10
+    max_probe_trades_per_day: int = 3
+
+
+@dataclass(frozen=True)
+class SidePolicySection:
+    long: LongSidePolicySection = field(default_factory=LongSidePolicySection)
+
+
+@dataclass(frozen=True)
+class SymbolHealthModeSection:
+    risk_multiplier: float = 1.0
+    max_trades_per_day: int = 0
+    observe_only: bool = False
+
+
+@dataclass(frozen=True)
+class SymbolHealthPolicySection:
+    probation: SymbolHealthModeSection = field(
+        default_factory=lambda: SymbolHealthModeSection(
+            risk_multiplier=0.25,
+            max_trades_per_day=2,
+        )
+    )
+    weak: SymbolHealthModeSection = field(
+        default_factory=lambda: SymbolHealthModeSection(
+            risk_multiplier=0.10,
+            max_trades_per_day=1,
+        )
+    )
+    observe_only: SymbolHealthModeSection = field(
+        default_factory=lambda: SymbolHealthModeSection(
+            risk_multiplier=0.0,
+            max_trades_per_day=0,
+            observe_only=True,
+        )
+    )
+
+
+@dataclass(frozen=True)
 class ExecutionSection:
     mode: TradeMode = TradeMode.LOCAL_PAPER
     slippage_bps: float = 5.0
@@ -191,6 +359,14 @@ class AppConfig:
     backtest: BacktestSection
     reporting: ReportingSection
     research: ResearchSection
+    learning_mode: LearningModeSection = field(default_factory=LearningModeSection)
+    learning_risk: LearningRiskSection = field(default_factory=LearningRiskSection)
+    learning_signals: LearningSignalsSection = field(default_factory=LearningSignalsSection)
+    learning_microstructure: LearningMicrostructureSection = field(default_factory=LearningMicrostructureSection)
+    ml_learning_policy: MlLearningPolicySection = field(default_factory=MlLearningPolicySection)
+    confirmation_5m: Confirmation5mPolicySection = field(default_factory=Confirmation5mPolicySection)
+    side_policy: SidePolicySection = field(default_factory=SidePolicySection)
+    symbol_health_policy: SymbolHealthPolicySection = field(default_factory=SymbolHealthPolicySection)
 
     def resolve_path(self, value: str) -> Path:
         path = Path(value)
@@ -231,6 +407,31 @@ def _parse_instrument(payload: dict[str, Any]) -> Instrument:
     )
 
 
+def _dataclass_payload(cls, payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    allowed = set(cls.__dataclass_fields__)
+    return {key: value for key, value in payload.items() if key in allowed}
+
+
+def _parse_mode_risk(payload: dict[str, Any] | None, default: ModeRiskSection) -> ModeRiskSection:
+    values = {**default.__dict__, **_dataclass_payload(ModeRiskSection, payload)}
+    return ModeRiskSection(**values)
+
+
+def _parse_mode_signal(payload: dict[str, Any] | None, default: ModeSignalSection) -> ModeSignalSection:
+    values = {**default.__dict__, **_dataclass_payload(ModeSignalSection, payload)}
+    return ModeSignalSection(**values)
+
+
+def _parse_mode_microstructure(
+    payload: dict[str, Any] | None,
+    default: ModeMicrostructureSection,
+) -> ModeMicrostructureSection:
+    values = {**default.__dict__, **_dataclass_payload(ModeMicrostructureSection, payload)}
+    return ModeMicrostructureSection(**values)
+
+
 def load_config(config_path: str | Path) -> AppConfig:
     config_path = Path(config_path).resolve()
     root_dir = config_path.parent.parent
@@ -254,8 +455,107 @@ def load_config(config_path: str | Path) -> AppConfig:
         instruments=instruments,
     )
 
-    strategy = StrategySection(**raw.get("strategy", {}))
-    risk = RiskSection(**raw.get("risk", {}))
+    strategy = StrategySection(**_dataclass_payload(StrategySection, raw.get("strategy", {})))
+    risk_raw = raw.get("risk", {})
+    risk = RiskSection(**_dataclass_payload(RiskSection, risk_raw))
+
+    learning_mode = LearningModeSection(
+        **_dataclass_payload(LearningModeSection, raw.get("learning_mode", {}))
+    )
+    default_learning_risk = LearningRiskSection()
+    learning_risk_raw = raw.get("learning_risk", {})
+    learning_risk = LearningRiskSection(
+        normal=_parse_mode_risk(
+            learning_risk_raw.get("normal", {}) if isinstance(learning_risk_raw, dict) else {},
+            default_learning_risk.normal,
+        ),
+        probe=_parse_mode_risk(
+            learning_risk_raw.get("probe", {}) if isinstance(learning_risk_raw, dict) else {},
+            default_learning_risk.probe,
+        ),
+        exploration=_parse_mode_risk(
+            learning_risk_raw.get("exploration", {}) if isinstance(learning_risk_raw, dict) else {},
+            default_learning_risk.exploration,
+        ),
+    )
+    signals_raw = raw.get("signals", {})
+    default_learning_signals = LearningSignalsSection()
+    learning_signals = LearningSignalsSection(
+        normal=_parse_mode_signal(
+            signals_raw.get("normal", {}) if isinstance(signals_raw, dict) else {},
+            default_learning_signals.normal,
+        ),
+        probe=_parse_mode_signal(
+            signals_raw.get("probe", {}) if isinstance(signals_raw, dict) else {},
+            default_learning_signals.probe,
+        ),
+        exploration=_parse_mode_signal(
+            signals_raw.get("exploration", {}) if isinstance(signals_raw, dict) else {},
+            default_learning_signals.exploration,
+        ),
+    )
+    microstructure_raw = raw.get("microstructure", {})
+    default_learning_microstructure = LearningMicrostructureSection()
+    learning_microstructure = LearningMicrostructureSection(
+        normal=_parse_mode_microstructure(
+            microstructure_raw.get("normal", {}) if isinstance(microstructure_raw, dict) else {},
+            default_learning_microstructure.normal,
+        ),
+        probe=_parse_mode_microstructure(
+            microstructure_raw.get("probe", {}) if isinstance(microstructure_raw, dict) else {},
+            default_learning_microstructure.probe,
+        ),
+        exploration=_parse_mode_microstructure(
+            microstructure_raw.get("exploration", {}) if isinstance(microstructure_raw, dict) else {},
+            default_learning_microstructure.exploration,
+        ),
+    )
+    ml_learning_policy = MlLearningPolicySection(
+        **_dataclass_payload(MlLearningPolicySection, raw.get("ml_learning", {}))
+    )
+    confirmation_5m = Confirmation5mPolicySection(
+        **_dataclass_payload(Confirmation5mPolicySection, raw.get("confirmation_5m", {}))
+    )
+    side_raw = raw.get("side", {})
+    side_policy = SidePolicySection(
+        long=LongSidePolicySection(
+            **_dataclass_payload(
+                LongSidePolicySection,
+                side_raw.get("long", {}) if isinstance(side_raw, dict) else {},
+            )
+        )
+    )
+    symbol_health_raw = raw.get("symbol_health", {})
+    default_symbol_health = SymbolHealthPolicySection()
+    symbol_health_policy = SymbolHealthPolicySection(
+        probation=SymbolHealthModeSection(
+            **{
+                **default_symbol_health.probation.__dict__,
+                **_dataclass_payload(
+                    SymbolHealthModeSection,
+                    symbol_health_raw.get("probation", {}) if isinstance(symbol_health_raw, dict) else {},
+                ),
+            }
+        ),
+        weak=SymbolHealthModeSection(
+            **{
+                **default_symbol_health.weak.__dict__,
+                **_dataclass_payload(
+                    SymbolHealthModeSection,
+                    symbol_health_raw.get("weak", {}) if isinstance(symbol_health_raw, dict) else {},
+                ),
+            }
+        ),
+        observe_only=SymbolHealthModeSection(
+            **{
+                **default_symbol_health.observe_only.__dict__,
+                **_dataclass_payload(
+                    SymbolHealthModeSection,
+                    symbol_health_raw.get("observe_only", {}) if isinstance(symbol_health_raw, dict) else {},
+                ),
+            }
+        ),
+    )
 
     execution_raw = raw.get("execution", {})
     execution = ExecutionSection(
@@ -277,6 +577,14 @@ def load_config(config_path: str | Path) -> AppConfig:
         data=data,
         strategy=strategy,
         risk=risk,
+        learning_mode=learning_mode,
+        learning_risk=learning_risk,
+        learning_signals=learning_signals,
+        learning_microstructure=learning_microstructure,
+        ml_learning_policy=ml_learning_policy,
+        confirmation_5m=confirmation_5m,
+        side_policy=side_policy,
+        symbol_health_policy=symbol_health_policy,
         execution=execution,
         backtest=backtest,
         reporting=reporting,

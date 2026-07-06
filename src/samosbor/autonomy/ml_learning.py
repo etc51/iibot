@@ -11,6 +11,7 @@ from ..domain import Candle, Signal, SignalDirection, TradeRecord
 
 LOW_QUALITY_PROBABILITY_THRESHOLD = 0.40
 MIN_LEARNING_SAMPLES = 50
+ML_NEGATIVE_EDGE_POSITION_SCALE = 0.25
 LOW_QUALITY_TAG = "low-quality-learning"
 NEGATIVE_EXPECTANCY_TAG = "negative-expectancy-learning"
 COMMISSION_EDGE_TAG = "commission-edge-learning"
@@ -369,6 +370,45 @@ def assess_signal_learning(
         "required_net_edge_rub": round(required_net_edge_rub, 2),
         "low_quality_probability_threshold": low_quality_probability_threshold,
         "learning_tags": tags,
+    }
+
+
+def learning_position_size_adjustment(
+    learning: dict[str, object],
+    quantity_lots: int,
+    *,
+    negative_edge_scale: float = ML_NEGATIVE_EDGE_POSITION_SCALE,
+) -> dict[str, object]:
+    original_quantity = max(0, int(quantity_lots))
+    if original_quantity < 1:
+        return {
+            "active": False,
+            "reason": "no approved quantity",
+            "original_quantity_lots": original_quantity,
+            "adjusted_quantity_lots": 0,
+            "scale": 0.0,
+        }
+    if not isinstance(learning, dict) or not learning.get("available") or not learning.get("blocks_entry"):
+        return {
+            "active": False,
+            "reason": "ML sizing not required",
+            "original_quantity_lots": original_quantity,
+            "adjusted_quantity_lots": original_quantity,
+            "scale": 1.0,
+        }
+
+    requested_scale = max(0.0, min(1.0, float(negative_edge_scale)))
+    adjusted_quantity = int(original_quantity * requested_scale)
+    if requested_scale > 0:
+        adjusted_quantity = max(1, adjusted_quantity)
+    adjusted_quantity = min(original_quantity, adjusted_quantity)
+    return {
+        "active": True,
+        "reason": "reduced by ML negative edge",
+        "original_quantity_lots": original_quantity,
+        "adjusted_quantity_lots": adjusted_quantity,
+        "scale": round(adjusted_quantity / original_quantity, 4),
+        "requested_scale": round(requested_scale, 4),
     }
 
 

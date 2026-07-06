@@ -116,6 +116,144 @@ def test_trade_review_uses_order_book_microstructure_tags():
     assert payload["breakdowns"]["microstructure_quality"][0]["group"] == "wide-spread"
 
 
+def test_trade_review_breaks_down_regime_policy_and_pending_rebound():
+    opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+    trades = [
+        _trade(
+            symbol="SBER",
+            entry_time=opened,
+            net_pnl=-50.0,
+            signal_strength=0.7,
+            direction=SignalDirection.SHORT,
+            entry_metadata={
+                "market_regime": {"regime": "weak_down_choppy", "confidence": 0.8},
+                "entry_mode": "pullback_short",
+                "symbol_health": "probation",
+                "regime_policy": {
+                    "allow_trade": True,
+                    "entry_mode": "pullback_short",
+                    "risk_multiplier": 0.5,
+                    "symbol_health": "probation",
+                    "reasons": ["weak-down-choppy-pullback-short"],
+                },
+                "pending_entry": {
+                    "state": "WAIT_PULLBACK_SHORT",
+                    "outcome": "triggered",
+                },
+            },
+        )
+    ]
+
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=-50.0),
+        trades,
+        [],
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    review = payload["reviews"][0]
+    assert review["market_regime"] == "weak_down_choppy"
+    assert review["entry_mode"] == "pullback_short"
+    assert review["symbol_health"] == "probation"
+    assert review["rebound_outcome"] == "triggered"
+    assert "failed-rebound-trigger-loss" in review["mistake_tags"]
+    assert "symbol-probation-loss" in review["mistake_tags"]
+    assert payload["breakdowns"]["market_regime"][0]["group"] == "weak_down_choppy"
+    assert payload["breakdowns"]["entry_mode"][0]["group"] == "pullback_short"
+    assert payload["breakdowns"]["symbol_health"][0]["group"] == "probation"
+    assert payload["breakdowns"]["rebound_outcome"][0]["group"] == "triggered"
+    assert any(item["action"] == "tighten-pullback-short-trigger" for item in payload["recommendations"])
+
+
+def test_trade_review_reports_policy_decisions_and_shadow_outcomes():
+    opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+    trades = [
+        _trade(
+            symbol="SBER",
+            entry_time=opened,
+            net_pnl=25.0,
+            signal_strength=0.7,
+            direction=SignalDirection.SHORT,
+            entry_metadata={
+                "regime_policy": {
+                    "allow_trade": True,
+                    "decision_type": "probe_trade",
+                    "actual_policy_decision": "probe_trade",
+                    "strict_policy_decision": "wait",
+                    "would_strict_policy_trade": False,
+                    "relaxed_only_trade": True,
+                    "effective_risk_multiplier": 0.12,
+                    "soft_issues": ["weak-down-choppy-trend-short-probe"],
+                },
+            },
+        ),
+        _trade(
+            symbol="GAZP",
+            entry_time=opened + timedelta(hours=1),
+            net_pnl=-15.0,
+            signal_strength=0.6,
+            direction=SignalDirection.SHORT,
+            entry_metadata={
+                "shadow_trade_id": "shadow|GAZP|short|2025-01-01T11:00:00+00:00",
+                "shadow_type": "policy_rejected",
+                "regime_policy": {
+                    "allow_trade": False,
+                    "decision_type": "hard_reject",
+                    "actual_policy_decision": "hard_reject",
+                    "strict_policy_decision": "reject",
+                    "would_strict_policy_trade": False,
+                    "relaxed_only_trade": False,
+                    "hard_issues": ["adverse-book-below-hard-limit"],
+                },
+            },
+        ),
+    ]
+    events = [
+        {
+            "timestamp": opened.isoformat(),
+            "action": "signal",
+            "symbol": "SBER",
+            "approved": True,
+            "actual_policy_decision": "probe_trade",
+            "strict_policy_decision": "wait",
+            "relaxed_only_trade": True,
+        },
+        {
+            "timestamp": (opened + timedelta(hours=1)).isoformat(),
+            "action": "signal",
+            "symbol": "GAZP",
+            "approved": False,
+            "actual_policy_decision": "hard_reject",
+            "strict_policy_decision": "reject",
+        },
+    ]
+
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=10.0),
+        trades,
+        events,
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    reviews = {review["symbol"]: review for review in payload["reviews"]}
+    assert reviews["SBER"]["trade_source"] == "executed"
+    assert reviews["SBER"]["actual_policy_decision"] == "probe_trade"
+    assert reviews["SBER"]["strict_policy_decision"] == "wait"
+    assert reviews["SBER"]["relaxed_only_trade"] is True
+    assert reviews["GAZP"]["trade_source"] == "policy_rejected_shadow"
+    assert payload["policy_signal_distribution"]["relaxed_only_signals"] == 1
+    assert payload["policy_outcomes"]["resolved_shadow_trades"] == 1
+    assert payload["policy_outcomes"]["relaxed_only_trades"] == 1
+    assert {row["group"] for row in payload["breakdowns"]["actual_policy_decision"]} == {
+        "probe_trade",
+        "hard_reject",
+    }
+
+
 def test_trade_review_exposes_post_close_analysis():
     opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
     trades = [

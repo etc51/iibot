@@ -161,6 +161,27 @@ max_position_exposure_ratio = 0.18
 kelly_lookback_trades = 20
 min_trades_for_kelly = 8
 
+[learning_mode]
+enabled = true
+profile = "relaxed_paper_learning"
+record_strict_policy_shadow = true
+record_rejected_shadow = true
+
+[learning_risk.normal]
+risk_multiplier = 1.0
+max_positions = 6
+max_trades_per_day = 20
+
+[learning_risk.probe]
+risk_multiplier = 0.3
+max_positions = 2
+max_trades_per_day = 6
+
+[learning_risk.exploration]
+risk_multiplier = 0.1
+max_positions = 1
+max_trades_per_day = 3
+
 [execution]
 mode = "local-paper"
 slippage_bps = 4.0

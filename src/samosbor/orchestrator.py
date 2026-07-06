@@ -41,12 +41,24 @@ from .autonomy.ml_learning import (
     assess_signal_learning,
     build_entry_candle_context,
     build_setup_learning_tags,
+    indicator_from_reason,
+    learning_position_size_adjustment,
 )
+from .autonomy.market_regime import detect_market_regime
+from .autonomy.pending_entries import (
+    evaluate_pending_entries,
+    pending_entry_expired_event,
+    pending_entry_quantity_lots,
+    pending_entry_signal,
+    record_pending_pullback_short,
+)
+from .autonomy.regime_policy import PolicyDecisionType, resolve as resolve_regime_policy
 from .autonomy.signal_feedback import (
     backfill_signal_feedback_for_symbol,
     build_trade_evidence,
     default_signal_horizon_bars,
     load_signal_feedback,
+    record_rejected_shadow_signal,
     record_shadow_signal,
     resolve_pending_signals,
     save_signal_feedback,
@@ -79,7 +91,7 @@ from .data.csv_provider import CSVMarketDataProvider
 from .data.moex_data_pack import MoexDataPackProvider
 from .data.parquet_directory import ParquetDirectoryProvider
 from .data.tbank import TBankMarketDataProvider
-from .domain import ExitReason
+from .domain import ExitReason, SignalDirection
 from .execution.paper import LocalPaperBroker
 from .execution.sandbox import TBankSandboxExecutor
 from .reporting.metrics import compute_summary
@@ -151,8 +163,17 @@ class TradingOrchestrator:
         raise ValueError(f"Unsupported data source: {self.config.data.source}")
 
     def _strategy(self) -> TrendFollowingStrategy:
+        strategy_config = self.config.strategy
+        if self._relaxed_learning_enabled():
+            exploration = self.config.learning_signals.exploration
+            strategy_config = replace(
+                strategy_config,
+                min_signal_strength=exploration.min_signal_strength,
+                min_trend_strength=exploration.min_trend_strength,
+                adx_min=exploration.adx_min,
+            )
         return TrendFollowingStrategy(
-            self.config.strategy,
+            strategy_config,
             timeframe=self.config.data.timeframe,
         )
 
@@ -177,6 +198,12 @@ class TradingOrchestrator:
 
     def _risk_manager(self) -> RiskManager:
         return RiskManager(self.config.risk)
+
+    def _relaxed_learning_enabled(self) -> bool:
+        return (
+            bool(getattr(self.config.learning_mode, "enabled", False))
+            and self.config.execution.mode.value == "local-paper"
+        )
 
     def _load_paper_broker(self) -> LocalPaperBroker:
         state_path = self.config.resolve_path(self.config.execution.state_path)
@@ -1021,7 +1048,25 @@ class TradingOrchestrator:
             shadow_strategy.prepare_history(instrument, history.get(instrument.symbol, []))
         risk_manager = self._risk_manager()
         cycle_events: list[dict[str, object]] = []
+        market_regime = detect_market_regime(history)
+        cycle_events.append(
+            {
+                "timestamp": timestamp.isoformat(),
+                "action": "market_regime",
+                **market_regime.as_event(),
+            }
+        )
         resolve_pending_signals(signal_feedback, history)
+        pending_entry_results = evaluate_pending_entries(signal_feedback, history)
+        triggered_pending_entries_by_symbol: dict[str, list[dict[str, object]]] = {}
+        for pending_result in pending_entry_results:
+            if pending_result.get("status") == "expired":
+                cycle_events.append(pending_entry_expired_event(pending_result))
+                continue
+            item = dict(pending_result.get("item", {}))
+            symbol = str(item.get("symbol", ""))
+            if symbol:
+                triggered_pending_entries_by_symbol.setdefault(symbol, []).append(pending_result)
 
         broker.mark_to_market(marks, timestamp)
         risk_manager.update_drawdown_state(broker.portfolio, marks)
@@ -1123,6 +1168,27 @@ class TradingOrchestrator:
                             reason=reason,
                         )
 
+            opened_pending_entry = False
+            if position is None:
+                for pending_result in triggered_pending_entries_by_symbol.get(instrument.symbol, []):
+                    pending_events = self._process_pending_entry_trigger(
+                        provider,
+                        broker,
+                        risk_manager,
+                        signal_feedback,
+                        pending_result,
+                        marks,
+                        market_regime=market_regime,
+                        timestamp=latest.timestamp,
+                    )
+                    cycle_events.extend(pending_events)
+                    position = broker.portfolio.positions.get(instrument.symbol)
+                    if position is not None:
+                        opened_pending_entry = True
+                        break
+            if opened_pending_entry:
+                continue
+
             signal = strategy.generate_signal(instrument, candles)
             shadow_signal = shadow_strategy.generate_signal(instrument, candles)
             if signal is not None:
@@ -1202,6 +1268,7 @@ class TradingOrchestrator:
                     continue
                 decision = risk_manager.approve(broker.portfolio, signal, marks, broker.trades)
                 signal_for_entry = signal
+                entry_quantity_lots = decision.quantity_lots
                 microstructure_block_reason = None
                 if decision.approved:
                     microstructure_block_reason = self._entry_confirmation_block_reason(signal_for_entry)
@@ -1209,33 +1276,94 @@ class TradingOrchestrator:
                         signal_for_entry = self._signal_with_entry_microstructure(
                             provider,
                             signal,
-                            quantity_lots=decision.quantity_lots,
+                            quantity_lots=entry_quantity_lots,
                         )
                         signal_for_entry = self._signal_with_learning_assessment(
                             signal_for_entry,
                             signal_feedback,
                             timestamp=latest.timestamp,
-                            quantity_lots=decision.quantity_lots,
+                            quantity_lots=entry_quantity_lots,
                         )
                         microstructure_block_reason = self._microstructure_block_reason(signal_for_entry)
                         if microstructure_block_reason is None:
-                            microstructure_block_reason = self._learning_entry_block_reason(signal_for_entry)
+                            (
+                                signal_for_entry,
+                                entry_quantity_lots,
+                                microstructure_block_reason,
+                            ) = self._signal_with_runtime_policy(
+                                signal_for_entry,
+                                entry_quantity_lots,
+                                market_regime=market_regime,
+                                symbol_health=self._symbol_health(instrument.symbol, broker.trades),
+                                entry_mode=(
+                                    "trend_short"
+                                    if signal.direction == SignalDirection.SHORT
+                                    else "trend_long"
+                                ),
+                            )
+                            if microstructure_block_reason is None:
+                                microstructure_block_reason = self._learning_mode_limit_reason(
+                                    broker,
+                                    signal_for_entry,
+                                    timestamp=latest.timestamp,
+                                    extra_events=cycle_events,
+                                )
+                                if microstructure_block_reason is not None:
+                                    entry_quantity_lots = 0
+                            if microstructure_block_reason is None:
+                                pending_created_event = self._record_waiting_pullback_short(
+                                    signal_feedback,
+                                    signal_for_entry,
+                                    candles=candles,
+                                    timestamp=latest.timestamp,
+                                    quantity_lots=decision.quantity_lots,
+                                    market_regime=market_regime,
+                                )
+                                if pending_created_event is not None:
+                                    cycle_events.append(pending_created_event)
+                                policy = signal_for_entry.metadata.get("regime_policy", {})
+                                if isinstance(policy, dict) and policy.get("entry_mode") == "wait":
+                                    microstructure_block_reason = "entry deferred for pullback short"
 
                 event = {
                     "timestamp": latest.timestamp.isoformat(),
                     "symbol": instrument.symbol,
                     "action": "signal",
+                    "event_type": "policy_decision",
                     "approved": decision.approved and microstructure_block_reason is None,
                     "reason": microstructure_block_reason or decision.reason,
                     "direction": signal.direction.value,
                     "strength": signal.strength,
-                    "quantity_lots": decision.quantity_lots if microstructure_block_reason is None else 0,
+                    "quantity_lots": entry_quantity_lots if microstructure_block_reason is None else 0,
+                    "original_quantity_lots": decision.quantity_lots,
                     "metadata": dict(signal_for_entry.metadata),
                 }
+                event["metadata"].setdefault("market_regime", market_regime.as_event())
+                if "regime_policy" in event["metadata"]:
+                    event["metadata"]["regime_policy_audit"] = event["metadata"]["regime_policy"]
+                event.update(self._policy_event_fields(signal_for_entry))
+                shadow_trade_id = self._record_rejected_shadow_if_needed(
+                    signal_feedback,
+                    signal_for_entry,
+                    timestamp=latest.timestamp,
+                    quantity_lots=decision.quantity_lots,
+                    block_reason=microstructure_block_reason,
+                )
+                if shadow_trade_id:
+                    event["shadow_trade_id"] = shadow_trade_id
+                    event["metadata"]["shadow_trade_id"] = shadow_trade_id
+                strict_shadow_id = self._record_strict_policy_shadow_if_needed(
+                    signal_feedback,
+                    signal_for_entry,
+                    timestamp=latest.timestamp,
+                )
+                if strict_shadow_id:
+                    event["strict_shadow_trade_id"] = strict_shadow_id
+                    event["metadata"]["strict_shadow_trade_id"] = strict_shadow_id
                 cycle_events.append(event)
                 if decision.approved:
                     if microstructure_block_reason is None:
-                        broker.open_position(signal_for_entry, decision.quantity_lots, latest.timestamp)
+                        broker.open_position(signal_for_entry, entry_quantity_lots, latest.timestamp)
 
         broker.mark_to_market(marks, timestamp)
         broker.events.extend(cycle_events)
@@ -1356,26 +1484,470 @@ class TradingOrchestrator:
         )
         return replace(signal, metadata=metadata)
 
-    def _learning_entry_block_reason(self, signal) -> str | None:
-        learning = signal.metadata.get("ml_learning", {})
-        if not isinstance(learning, dict):
+    def _process_pending_entry_trigger(
+        self,
+        provider,
+        broker,
+        risk_manager,
+        feedback_payload: dict[str, object],
+        pending_result: dict[str, object],
+        marks: dict[str, float],
+        *,
+        market_regime,
+        timestamp: datetime,
+    ) -> list[dict[str, object]]:
+        item = dict(pending_result.get("item", {}))
+        event_timestamp = str(pending_result.get("timestamp", timestamp.isoformat()))
+        fill_timestamp = self._parse_event_timestamp(event_timestamp, fallback=timestamp)
+        signal = pending_entry_signal(
+            item,
+            reward_to_risk=self.config.strategy.reward_to_risk,
+        )
+        approved_pending_quantity = pending_entry_quantity_lots(item)
+        decision = risk_manager.approve(broker.portfolio, signal, marks, broker.trades)
+        signal_for_entry = signal
+        entry_quantity_lots = min(decision.quantity_lots, approved_pending_quantity)
+        block_reason = None
+        if decision.approved and entry_quantity_lots < 1:
+            block_reason = "entry blocked by pending-entry quantity limit"
+        if decision.approved and block_reason is None:
+            signal_for_entry = self._signal_with_entry_microstructure(
+                provider,
+                signal_for_entry,
+                quantity_lots=entry_quantity_lots,
+            )
+            signal_for_entry = self._signal_with_learning_assessment(
+                signal_for_entry,
+                feedback_payload,
+                timestamp=fill_timestamp,
+                quantity_lots=entry_quantity_lots,
+            )
+            block_reason = self._microstructure_block_reason(signal_for_entry)
+            if block_reason is None:
+                (
+                    signal_for_entry,
+                    entry_quantity_lots,
+                    block_reason,
+                ) = self._signal_with_runtime_policy(
+                    signal_for_entry,
+                    entry_quantity_lots,
+                    market_regime=market_regime,
+                    symbol_health=self._symbol_health(signal.instrument.symbol, broker.trades),
+                    entry_mode="pullback_short",
+                )
+                if block_reason is None:
+                    block_reason = self._learning_mode_limit_reason(
+                        broker,
+                        signal_for_entry,
+                        timestamp=fill_timestamp,
+                    )
+                    if block_reason is not None:
+                        entry_quantity_lots = 0
+
+        pending_event = {
+            "timestamp": event_timestamp,
+            "symbol": signal.instrument.symbol,
+            "action": "pending-entry",
+            "status": "triggered",
+            "state": item.get("state", ""),
+            "reason": pending_result.get("reason", "pending entry triggered"),
+            "metadata": {
+                "id": item.get("id", ""),
+                "created_at": item.get("created_at", ""),
+                "triggered_at": item.get("triggered_at", ""),
+                "bars_seen": item.get("bars_seen", 0),
+                "rebound_high": item.get("rebound_high", 0.0),
+                "quantity_lots": approved_pending_quantity,
+            },
+        }
+        signal_event = {
+            "timestamp": event_timestamp,
+            "symbol": signal.instrument.symbol,
+            "action": "signal",
+            "event_type": "policy_decision",
+            "approved": decision.approved and block_reason is None,
+            "reason": block_reason or decision.reason,
+            "direction": signal.direction.value,
+            "strength": signal.strength,
+            "quantity_lots": entry_quantity_lots if block_reason is None else 0,
+            "original_quantity_lots": decision.quantity_lots,
+            "metadata": dict(signal_for_entry.metadata),
+        }
+        signal_event["metadata"].setdefault("market_regime", market_regime.as_event())
+        if "regime_policy" in signal_event["metadata"]:
+            signal_event["metadata"]["regime_policy_audit"] = signal_event["metadata"]["regime_policy"]
+        signal_event.update(self._policy_event_fields(signal_for_entry))
+        shadow_trade_id = self._record_rejected_shadow_if_needed(
+            feedback_payload,
+            signal_for_entry,
+            timestamp=fill_timestamp,
+            quantity_lots=approved_pending_quantity,
+            block_reason=block_reason,
+        )
+        if shadow_trade_id:
+            signal_event["shadow_trade_id"] = shadow_trade_id
+            signal_event["metadata"]["shadow_trade_id"] = shadow_trade_id
+        strict_shadow_id = self._record_strict_policy_shadow_if_needed(
+            feedback_payload,
+            signal_for_entry,
+            timestamp=fill_timestamp,
+        )
+        if strict_shadow_id:
+            signal_event["strict_shadow_trade_id"] = strict_shadow_id
+            signal_event["metadata"]["strict_shadow_trade_id"] = strict_shadow_id
+        if decision.approved and block_reason is None:
+            broker.open_position(signal_for_entry, entry_quantity_lots, fill_timestamp)
+        return [pending_event, signal_event]
+
+    def _signal_with_runtime_policy(
+        self,
+        signal,
+        quantity_lots: int,
+        *,
+        market_regime,
+        symbol_health: str,
+        entry_mode: str,
+    ):
+        policy = resolve_regime_policy(
+            regime=market_regime.regime,
+            symbol=signal.instrument.symbol,
+            side=signal.direction,
+            ml_feedback=signal.metadata.get("ml_learning", {}),
+            book=signal.metadata.get("microstructure", {}),
+            confirmation=signal.metadata.get("entry_confirmation", {}),
+            entry_mode=entry_mode,
+            symbol_health=symbol_health,
+            long_side_enabled=True,
+            learning_mode_enabled=self._relaxed_learning_enabled(),
+            learning_profile=self.config.learning_mode.profile,
+            signal_strength=signal.strength,
+            trend_strength=self._signal_metadata_float(signal, "trend_strength"),
+            adx=indicator_from_reason(signal.reason, "adx"),
+            require_order_book=self.config.strategy.require_order_book,
+            config=self.config,
+        )
+        metadata = dict(signal.metadata)
+        metadata["market_regime"] = market_regime.as_event()
+        metadata["symbol_health"] = symbol_health
+        metadata["regime_policy"] = policy.as_metadata()
+        metadata["regime_policy_audit"] = policy.as_metadata()
+        metadata["entry_mode"] = policy.entry_mode
+        metadata["actual_policy_profile"] = policy.actual_policy_profile
+        metadata["actual_policy_decision"] = policy.decision_type
+        metadata["strict_policy_decision"] = policy.strict_policy_decision
+        metadata["strict_policy_reasons"] = list(policy.strict_policy_reasons)
+        metadata["actual_policy_reasons"] = list(policy.actual_policy_reasons)
+        metadata["would_strict_policy_trade"] = policy.would_strict_policy_trade
+        metadata["would_strict_policy_risk_multiplier"] = policy.would_strict_policy_risk_multiplier
+        metadata["relaxed_only_trade"] = policy.relaxed_only_trade
+        metadata["risk_multiplier"] = policy.risk_multiplier
+        metadata["effective_risk_multiplier"] = policy.effective_risk_multiplier
+        metadata["soft_issues"] = list(policy.soft_issues)
+        metadata["hard_issues"] = list(policy.hard_issues)
+        metadata["policy_tags"] = list(policy.tags)
+        metadata["side_policy"] = dict(policy.side_policy)
+        metadata["symbol_health_policy"] = dict(policy.symbol_health_metadata)
+        metadata["confirmation_5m"] = dict(policy.confirmation_5m)
+
+        original_quantity = max(0, int(quantity_lots))
+        adjusted_quantity = original_quantity
+        block_reason = None
+        if policy.decision_type == PolicyDecisionType.WAIT_PULLBACK.value or policy.entry_mode == "wait":
+            adjusted_quantity = 0
+        elif not policy.allow_trade:
+            adjusted_quantity = 0
+            block_reason = self._policy_block_reason(policy)
+        else:
+            adjusted_quantity = self._quantity_after_multiplier(original_quantity, policy.risk_multiplier)
+            if adjusted_quantity < 1:
+                block_reason = "entry blocked by adaptive risk size < 1 lot"
+
+        metadata["adaptive_risk_sizing"] = {
+            "original_quantity_lots": original_quantity,
+            "adjusted_quantity_lots": adjusted_quantity,
+            "risk_multiplier": round(float(policy.risk_multiplier), 4),
+            "entry_mode": policy.entry_mode,
+            "symbol_health": symbol_health,
+            "reasons": list(policy.reasons),
+            "risk_components": dict(policy.risk_components),
+            "decision_type": policy.decision_type,
+            "actual_policy_profile": policy.actual_policy_profile,
+            "soft_issues": list(policy.soft_issues),
+            "hard_issues": list(policy.hard_issues),
+        }
+        ml_adjustment = learning_position_size_adjustment(
+            signal.metadata.get("ml_learning", {}),
+            original_quantity,
+        )
+        metadata["ml_sizing"] = {
+            "original_quantity_lots": original_quantity,
+            "final_quantity_lots": adjusted_quantity,
+            "scale": (
+                round(adjusted_quantity / original_quantity, 4)
+                if original_quantity
+                else 0.0
+            ),
+            "ml_negative_edge": policy.ml_negative_edge,
+            "soft_issue_count": len(policy.soft_issues),
+            "hard_issue_count": len(policy.hard_issues),
+            "policy_multiplier": policy.risk_multiplier,
+        }
+        if ml_adjustment.get("active"):
+            metadata["ml_sizing"] = {
+                **metadata["ml_sizing"],
+                **ml_adjustment,
+                "adjusted_quantity_lots": adjusted_quantity,
+            }
+
+        return replace(signal, metadata=metadata), adjusted_quantity, block_reason
+
+    def _record_waiting_pullback_short(
+        self,
+        feedback_payload: dict[str, object],
+        signal,
+        *,
+        candles,
+        timestamp: datetime,
+        quantity_lots: int,
+        market_regime,
+    ) -> dict[str, object] | None:
+        policy = signal.metadata.get("regime_policy", {})
+        if not isinstance(policy, dict) or policy.get("entry_mode") != "wait":
             return None
-        if not learning.get("available") or not learning.get("blocks_entry"):
+        item = record_pending_pullback_short(
+            feedback_payload,
+            signal,
+            candles=candles,
+            timestamp=timestamp,
+            quantity_lots=quantity_lots,
+            policy_metadata=policy,
+            market_regime=market_regime.as_event(),
+        )
+        if item is None:
+            return None
+        return {
+            "timestamp": timestamp.isoformat(),
+            "symbol": signal.instrument.symbol,
+            "action": "pending-entry",
+            "status": "created",
+            "state": item.get("state", ""),
+            "reason": "entry deferred for pullback short",
+            "metadata": {
+                "id": item.get("id", ""),
+                "entry_price": item.get("entry_price", 0.0),
+                "pullback_trigger_price": item.get("pullback_trigger_price", 0.0),
+                "failed_rebound_price": item.get("failed_rebound_price", 0.0),
+                "expires_after_bars": item.get("expires_after_bars", 0),
+                "quantity_lots": item.get("quantity_lots", 0),
+                "regime_policy": policy,
+            },
+        }
+
+    def _policy_event_fields(self, signal) -> dict[str, object]:
+        policy = signal.metadata.get("regime_policy", {})
+        if not isinstance(policy, dict):
+            return {}
+        return {
+            "actual_policy_profile": policy.get("actual_policy_profile", "strict"),
+            "actual_policy_decision": policy.get("actual_policy_decision", policy.get("decision_type", "")),
+            "strict_policy_decision": policy.get("strict_policy_decision", "unknown"),
+            "would_strict_policy_trade": policy.get("would_strict_policy_trade", True),
+            "risk_multiplier": policy.get("risk_multiplier", 1.0),
+            "effective_risk_multiplier": policy.get("effective_risk_multiplier", 1.0),
+            "soft_issues": policy.get("soft_issues", []),
+            "hard_issues": policy.get("hard_issues", []),
+            "tags": policy.get("tags", []),
+            "microstructure_bucket": policy.get("microstructure_bucket", "unknown"),
+            "confirmation_5m_status": policy.get("confirmation_5m_status", "unknown"),
+            "ml_negative_edge": policy.get("ml_negative_edge", False),
+            "symbol_health_status": policy.get("symbol_health", "unknown"),
+            "relaxed_only_trade": policy.get("relaxed_only_trade", False),
+        }
+
+    def _record_rejected_shadow_if_needed(
+        self,
+        feedback_payload: dict[str, object],
+        signal,
+        *,
+        timestamp: datetime,
+        quantity_lots: int,
+        block_reason: str | None,
+    ) -> str:
+        if not self._relaxed_learning_enabled():
+            return ""
+        if not bool(getattr(self.config.learning_mode, "record_rejected_shadow", False)):
+            return ""
+        policy = signal.metadata.get("regime_policy", {})
+        if not isinstance(policy, dict):
+            return ""
+        decision_type = str(policy.get("decision_type", ""))
+        if decision_type not in {
+            PolicyDecisionType.HARD_REJECT.value,
+            PolicyDecisionType.SHADOW_ONLY.value,
+        }:
+            return ""
+        return record_rejected_shadow_signal(
+            feedback_payload,
+            signal,
+            timestamp=timestamp,
+            horizon_bars=default_signal_horizon_bars(self.config.data.timeframe),
+            quantity_lots=max(1, int(quantity_lots or 1)),
+            rejection_reason=block_reason or "; ".join(str(item) for item in policy.get("reasons", [])),
+            decision_type=decision_type,
+            slippage_bps=self.config.execution.slippage_bps,
+            commission_bps=self.config.execution.commission_bps,
+            **self._signal_feedback_runner_kwargs(),
+        )
+
+    def _record_strict_policy_shadow_if_needed(
+        self,
+        feedback_payload: dict[str, object],
+        signal,
+        *,
+        timestamp: datetime,
+    ) -> str:
+        if not self._relaxed_learning_enabled():
+            return ""
+        if not bool(getattr(self.config.learning_mode, "record_strict_policy_shadow", False)):
+            return ""
+        policy = signal.metadata.get("regime_policy", {})
+        if not isinstance(policy, dict) or not policy.get("relaxed_only_trade"):
+            return ""
+        strict_shadow_id = "|".join(
+            [
+                "strict-shadow",
+                signal.instrument.symbol,
+                signal.direction.value,
+                timestamp.isoformat(),
+            ]
+        )
+        record = {
+            "shadow_trade_id": strict_shadow_id,
+            "symbol": signal.instrument.symbol,
+            "direction": signal.direction.value,
+            "created_at": timestamp.isoformat(),
+            "decision_type": policy.get("strict_policy_decision", "unknown"),
+            "reason": "; ".join(str(item) for item in policy.get("strict_policy_reasons", [])),
+            "status": "strict_policy_shadow_for_relaxed_trade",
+            "metadata": {
+                "actual_policy_decision": policy.get("actual_policy_decision", ""),
+                "strict_policy_decision": policy.get("strict_policy_decision", ""),
+                "relaxed_only_trade": True,
+                "regime_policy": policy,
+            },
+        }
+        shadows = feedback_payload.setdefault("shadow_rejected", [])
+        if not any(item.get("shadow_trade_id") == strict_shadow_id for item in shadows):
+            shadows.append(record)
+        return strict_shadow_id
+
+    def _learning_mode_limit_reason(
+        self,
+        broker,
+        signal,
+        *,
+        timestamp: datetime,
+        extra_events: list[dict[str, object]] | None = None,
+    ) -> str | None:
+        if not self._relaxed_learning_enabled():
+            return None
+        policy = signal.metadata.get("regime_policy", {})
+        if not isinstance(policy, dict):
+            return None
+        decision_type = str(policy.get("decision_type", ""))
+        mode_name = {
+            PolicyDecisionType.NORMAL_TRADE.value: "normal",
+            PolicyDecisionType.PROBE_TRADE.value: "probe",
+            PolicyDecisionType.EXPLORATION_TRADE.value: "exploration",
+        }.get(decision_type)
+        if mode_name is None:
+            return None
+        mode_config = getattr(self.config.learning_risk, mode_name)
+        open_positions = sum(
+            1
+            for position in broker.portfolio.positions.values()
+            if self._position_policy_mode(position) == decision_type
+        )
+        if open_positions >= int(mode_config.max_positions):
+            return f"entry blocked by {mode_name} learning max positions"
+
+        today = timestamp.date()
+        approved_today = 0
+        for event in list(broker.events) + list(extra_events or []):
+            if event.get("action") != "signal" or not bool(event.get("approved")):
+                continue
+            try:
+                event_date = datetime.fromisoformat(str(event.get("timestamp"))).date()
+            except ValueError:
+                continue
+            if event_date != today:
+                continue
+            metadata = event.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            event_decision = str(
+                event.get(
+                    "actual_policy_decision",
+                    metadata.get("actual_policy_decision", ""),
+                )
+            )
+            if event_decision == decision_type:
+                approved_today += 1
+        if approved_today >= int(mode_config.max_trades_per_day):
+            return f"entry blocked by {mode_name} learning daily trade cap"
+        return None
+
+    @staticmethod
+    def _position_policy_mode(position) -> str:
+        metadata = dict(getattr(position, "entry_metadata", {}) or {})
+        policy = metadata.get("regime_policy", {})
+        if isinstance(policy, dict):
+            return str(policy.get("decision_type", policy.get("actual_policy_decision", "")))
+        return str(metadata.get("actual_policy_decision", ""))
+
+    def _symbol_health(self, symbol: str, trades) -> str:
+        recent = [trade for trade in reversed(trades) if trade.symbol == symbol][:6]
+        if len(recent) < 3:
+            return "normal"
+        losses = sum(1 for trade in recent if trade.net_pnl < 0)
+        expectancy = sum(float(trade.net_pnl) for trade in recent) / len(recent)
+        if len(recent) >= 5 and losses >= 4 and expectancy < 0:
+            return "observe_only"
+        if losses >= 2 and expectancy < 0:
+            return "probation"
+        return "normal"
+
+    @staticmethod
+    def _quantity_after_multiplier(quantity_lots: int, multiplier: float) -> int:
+        quantity = max(0, int(quantity_lots))
+        bounded_multiplier = max(0.0, min(1.0, float(multiplier)))
+        if quantity < 1 or bounded_multiplier <= 0.0:
+            return 0
+        adjusted = int(quantity * bounded_multiplier)
+        return min(quantity, max(1, adjusted))
+
+    @staticmethod
+    def _signal_metadata_float(signal, key: str) -> float | None:
+        try:
+            return float(signal.metadata.get(key))
+        except (TypeError, ValueError):
             return None
 
-        probability = learning.get("probability_profit")
-        expected = learning.get("expected_pnl_position_rub")
-        required = learning.get("required_net_edge_rub")
-        parts = []
-        if probability is not None:
-            parts.append(f"p={float(probability):.2f}")
-        if expected is not None:
-            parts.append(f"expected={float(expected):.2f} RUB")
-        if required is not None:
-            parts.append(f"required={float(required):.2f} RUB")
-        details = ", ".join(parts)
-        suffix = f" ({details})" if details else ""
-        return f"entry blocked by ML negative edge{suffix}"
+    @staticmethod
+    def _policy_block_reason(policy) -> str:
+        reasons = ", ".join(str(reason) for reason in policy.reasons) or "policy rejected entry"
+        if policy.decision_type == PolicyDecisionType.SHADOW_ONLY.value:
+            return f"entry shadowed by relaxed policy ({reasons})"
+        if policy.decision_type == PolicyDecisionType.HARD_REJECT.value:
+            return f"entry hard rejected by regime policy ({reasons})"
+        return f"entry blocked by regime policy ({reasons})"
+
+    @staticmethod
+    def _parse_event_timestamp(value: str, *, fallback: datetime) -> datetime:
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return fallback
 
     def _take_profit_activates_runner(self, broker, symbol: str, position, candle) -> bool:
         if not self.config.strategy.take_profit_activates_runner:
@@ -1425,6 +1997,8 @@ class TradingOrchestrator:
         }
 
     def _entry_confirmation_block_reason(self, signal) -> str | None:
+        if self._relaxed_learning_enabled():
+            return None
         confirmation = signal.metadata.get("entry_confirmation", {})
         if not isinstance(confirmation, dict):
             return None
@@ -1464,6 +2038,8 @@ class TradingOrchestrator:
         return dict(snapshot)
 
     def _microstructure_block_reason(self, signal) -> str | None:
+        if self._relaxed_learning_enabled():
+            return None
         microstructure = dict(signal.metadata.get("microstructure", {}))
         if not microstructure.get("available"):
             if self.config.strategy.require_order_book:

@@ -27,6 +27,12 @@ def test_focused_runtime_matches_project_goal():
     assert config.strategy.runner_breakeven_buffer_bps == 10.0
     assert config.strategy.runner_trailing_atr_multiple == 1.3
     assert config.strategy.runner_profit_lock_ratio == 0.35
+    assert config.learning_mode.enabled is True
+    assert config.learning_mode.profile == "relaxed_paper_learning"
+    assert config.learning_risk.probe.max_positions == 2
+    assert config.learning_risk.probe.max_trades_per_day == 6
+    assert config.learning_risk.exploration.max_positions == 1
+    assert config.learning_risk.exploration.max_trades_per_day == 3
     assert config.backtest.initial_cash == 300_000
     assert effective_target_daily_profit_rub(config.research, config.backtest) == 2_000.0
     assert effective_target_monthly_profit_rub(config.research, config.backtest) == 40_000.0

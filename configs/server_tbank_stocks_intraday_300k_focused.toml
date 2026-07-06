@@ -178,6 +178,90 @@ figi = "RU000A106T36"
 uid = "aae786d8-e8f4-4428-91bb-cffa39ad01e4"
 lot_size = 1
 
+[[data.instruments]]
+symbol = "MGNT"
+instrument_type = "stock"
+figi = "BBG004RVFCY3"
+uid = "ca845f68-6c43-44bc-b584-330d2a1e5eb7"
+lot_size = 1
+
+[[data.instruments]]
+symbol = "AFLT"
+instrument_type = "stock"
+figi = "BBG004S683W7"
+uid = "1c69e020-f3b1-455c-affa-45f8b8049234"
+lot_size = 10
+
+[[data.instruments]]
+symbol = "IRAO"
+instrument_type = "stock"
+figi = "BBG004S68473"
+uid = "2dfbc1fd-b92a-436e-b011-928c79e805f2"
+lot_size = 100
+
+[[data.instruments]]
+symbol = "MOEX"
+instrument_type = "stock"
+figi = "BBG004730JJ5"
+uid = "5e1c2634-afc4-4e50-ad6d-f78fc14a539a"
+lot_size = 10
+
+[[data.instruments]]
+symbol = "ALRS"
+instrument_type = "stock"
+figi = "BBG004S68B31"
+uid = "30817fea-20e6-4fee-ab1f-d20fc1a1bb72"
+lot_size = 10
+
+[[data.instruments]]
+symbol = "GMKN"
+instrument_type = "stock"
+figi = "BBG004731489"
+uid = "509edd0c-129c-4ee2-934d-7f6246126da1"
+lot_size = 10
+
+[[data.instruments]]
+symbol = "MAGN"
+instrument_type = "stock"
+figi = "BBG004S68507"
+uid = "7132b1c9-ee26-4464-b5b5-1046264b61d9"
+lot_size = 10
+
+[[data.instruments]]
+symbol = "NLMK"
+instrument_type = "stock"
+figi = "BBG004S681B4"
+uid = "161eb0d0-aaac-4451-b374-f5d0eeb1b508"
+lot_size = 10
+
+[[data.instruments]]
+symbol = "SNGS"
+instrument_type = "stock"
+figi = "BBG0047315D0"
+uid = "1ffe1bff-d7b7-4b04-b482-34dc9cc0a4ba"
+lot_size = 100
+
+[[data.instruments]]
+symbol = "SNGSP"
+instrument_type = "stock"
+figi = "BBG004S681M2"
+uid = "a797f14a-8513-4b84-b15e-a3b98dc4cc00"
+lot_size = 10
+
+[[data.instruments]]
+symbol = "FEES"
+instrument_type = "stock"
+figi = "BBG00475JZZ6"
+uid = "88e130e8-5b68-4b05-b9ae-baf32f5a3f21"
+lot_size = 10000
+
+[[data.instruments]]
+symbol = "CBOM"
+instrument_type = "stock"
+figi = "BBG009GSYN76"
+uid = "ebfda284-4291-4337-9dfb-f55610d0a907"
+lot_size = 100
+
 [strategy]
 style = "ema_adx_macd"
 fast_window = 20
@@ -241,6 +325,27 @@ max_positions = 12
 max_position_exposure_ratio = 0.18
 kelly_lookback_trades = 20
 min_trades_for_kelly = 8
+
+[learning_mode]
+enabled = true
+profile = "relaxed_paper_learning"
+record_strict_policy_shadow = true
+record_rejected_shadow = true
+
+[learning_risk.normal]
+risk_multiplier = 1.0
+max_positions = 12
+max_trades_per_day = 20
+
+[learning_risk.probe]
+risk_multiplier = 0.3
+max_positions = 2
+max_trades_per_day = 6
+
+[learning_risk.exploration]
+risk_multiplier = 0.1
+max_positions = 1
+max_trades_per_day = 3
 
 [execution]
 mode = "local-paper"

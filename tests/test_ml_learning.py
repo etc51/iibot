@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from samosbor.autonomy.ml_learning import (
     COMMISSION_EDGE_TAG,
     CONFIRMATION_AFTER_IMPULSE_TAG,
+    ML_NEGATIVE_EDGE_POSITION_SCALE,
     LATE_REENTRY_TAG,
     LOW_QUALITY_TAG,
     SHORT_AFTER_EXHAUSTION_TAG,
@@ -12,6 +13,7 @@ from samosbor.autonomy.ml_learning import (
     build_entry_candle_context,
     build_setup_learning_tags,
     indicator_from_reason,
+    learning_position_size_adjustment,
 )
 from samosbor.domain import Candle, Instrument, InstrumentType, Signal, SignalDirection, TradeRecord
 
@@ -122,6 +124,24 @@ def test_signal_learning_blocks_low_quality_entry():
     assert LOW_QUALITY_TAG in result["learning_tags"]
     assert COMMISSION_EDGE_TAG in result["learning_tags"]
     assert CONFIRMATION_AFTER_IMPULSE_TAG in result["learning_tags"]
+
+
+def test_learning_position_size_adjustment_reduces_ml_block_to_quarter_size():
+    adjustment = learning_position_size_adjustment(
+        {
+            "available": True,
+            "blocks_entry": True,
+            "probability_profit": 0.16,
+            "expected_pnl_position_rub": -50.0,
+            "required_net_edge_rub": 20.0,
+        },
+        100,
+    )
+
+    assert adjustment["active"] is True
+    assert adjustment["adjusted_quantity_lots"] == 25
+    assert adjustment["requested_scale"] == ML_NEGATIVE_EDGE_POSITION_SCALE
+    assert adjustment["reason"] == "reduced by ML negative edge"
 
 
 def test_setup_learning_tags_detect_short_exhaustion_and_late_reentry():

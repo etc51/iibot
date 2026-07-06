@@ -77,7 +77,16 @@ def build_trade_review_payload(
             "exit_reason": _group_breakdown(reviews, "exit_reason"),
             "signal_strength_bucket": _group_breakdown(reviews, "signal_strength_bucket"),
             "microstructure_quality": _group_breakdown(reviews, "microstructure_quality"),
+            "market_regime": _group_breakdown(reviews, "market_regime"),
+            "entry_mode": _group_breakdown(reviews, "entry_mode"),
+            "symbol_health": _group_breakdown(reviews, "symbol_health"),
+            "rebound_outcome": _group_breakdown(reviews, "rebound_outcome"),
+            "trade_source": _group_breakdown(reviews, "trade_source"),
+            "actual_policy_decision": _group_breakdown(reviews, "actual_policy_decision"),
+            "strict_policy_decision": _group_breakdown(reviews, "strict_policy_decision"),
         },
+        "policy_signal_distribution": _policy_signal_distribution(parsed_events),
+        "policy_outcomes": _policy_outcomes(reviews),
         "mistake_breakdown": _mistake_breakdown(reviews),
         "recommendations": recommendations["items"],
         "config_patch_candidates": recommendations["config_patch_candidates"],
@@ -121,6 +130,14 @@ def _review_trade(
     microstructure = _microstructure_for_review(trade, microstructure_dir=microstructure_dir)
     ml_learning = _ml_learning_summary(trade.entry_metadata)
     post_close_analysis = _post_close_analysis_summary(trade.entry_metadata)
+    market_regime = _market_regime_summary(trade.entry_metadata)
+    regime_policy = _regime_policy_summary(trade.entry_metadata)
+    entry_mode = _entry_mode_summary(trade.entry_metadata, regime_policy)
+    symbol_health = _symbol_health_summary(trade.entry_metadata, regime_policy)
+    rebound_outcome = _rebound_outcome_summary(trade.entry_metadata)
+    trade_source = _trade_source(trade)
+    actual_policy_decision = str(regime_policy.get("actual_policy_decision", "unknown") or "unknown")
+    strict_policy_decision = str(regime_policy.get("strict_policy_decision", "unknown") or "unknown")
     mistake_tags = _mistake_tags(
         trade,
         holding_minutes=holding_minutes,
@@ -129,6 +146,10 @@ def _review_trade(
         current_min_signal_strength=strategy.min_signal_strength,
         microstructure=microstructure,
         ml_learning=ml_learning,
+        market_regime=market_regime,
+        entry_mode=entry_mode,
+        symbol_health=symbol_health,
+        rebound_outcome=rebound_outcome,
     )
     lessons = [_lesson_for_tag(tag) for tag in mistake_tags]
     return {
@@ -151,6 +172,18 @@ def _review_trade(
         "signal_strength_bucket": _strength_bucket(trade.signal_strength),
         "entry_context_score": round(trade.entry_context_score, 4),
         "entry_metadata": trade.entry_metadata,
+        "market_regime": market_regime,
+        "entry_mode": entry_mode,
+        "symbol_health": symbol_health,
+        "rebound_outcome": rebound_outcome,
+        "trade_source": trade_source,
+        "actual_policy_decision": actual_policy_decision,
+        "strict_policy_decision": strict_policy_decision,
+        "relaxed_only_trade": bool(regime_policy.get("relaxed_only_trade", False)),
+        "effective_risk_multiplier": regime_policy.get("effective_risk_multiplier", regime_policy.get("risk_multiplier", 1.0)),
+        "soft_issues": regime_policy.get("soft_issues", []),
+        "hard_issues": regime_policy.get("hard_issues", []),
+        "regime_policy": regime_policy,
         "entry_ml_learning": ml_learning,
         "post_close_analysis": post_close_analysis,
         "entry_microstructure": microstructure,
@@ -356,6 +389,125 @@ def _post_close_analysis_summary(metadata: dict[str, object]) -> dict[str, objec
     return {key: raw[key] for key in keys if key in raw}
 
 
+def _market_regime_summary(metadata: dict[str, object]) -> str:
+    raw = metadata.get("market_regime", {}) if isinstance(metadata, dict) else {}
+    if isinstance(raw, dict):
+        return str(raw.get("regime", "unknown") or "unknown")
+    if raw:
+        return str(raw)
+    return "unknown"
+
+
+def _regime_policy_summary(metadata: dict[str, object]) -> dict[str, object]:
+    raw = {}
+    if isinstance(metadata, dict):
+        raw = metadata.get("regime_policy", metadata.get("regime_policy_audit", {}))
+    if not isinstance(raw, dict) or not raw:
+        return {
+            "available": False,
+            "entry_mode": "unknown",
+            "risk_multiplier": 1.0,
+            "effective_risk_multiplier": 1.0,
+            "symbol_health": "unknown",
+            "actual_policy_profile": "unknown",
+            "actual_policy_decision": "unknown",
+            "strict_policy_decision": "unknown",
+            "would_strict_policy_trade": True,
+            "relaxed_only_trade": False,
+            "soft_issues": [],
+            "hard_issues": [],
+            "tags": [],
+            "reasons": [],
+        }
+    return {
+        "available": True,
+        "allow_trade": bool(raw.get("allow_trade", False)),
+        "entry_mode": str(raw.get("entry_mode", "unknown") or "unknown"),
+        "risk_multiplier": float(raw.get("risk_multiplier", 1.0) or 0.0),
+        "effective_risk_multiplier": float(raw.get("effective_risk_multiplier", raw.get("risk_multiplier", 1.0)) or 0.0),
+        "symbol_health": str(raw.get("symbol_health", "unknown") or "unknown"),
+        "actual_policy_profile": str(raw.get("actual_policy_profile", "strict") or "strict"),
+        "actual_policy_decision": str(
+            raw.get("actual_policy_decision", raw.get("decision_type", "unknown")) or "unknown"
+        ),
+        "strict_policy_decision": str(raw.get("strict_policy_decision", "unknown") or "unknown"),
+        "would_strict_policy_trade": bool(raw.get("would_strict_policy_trade", True)),
+        "would_strict_policy_risk_multiplier": float(raw.get("would_strict_policy_risk_multiplier", 0.0) or 0.0),
+        "relaxed_only_trade": bool(raw.get("relaxed_only_trade", False)),
+        "soft_issues": (
+            list(raw.get("soft_issues", []))
+            if isinstance(raw.get("soft_issues", []), list)
+            else []
+        ),
+        "hard_issues": (
+            list(raw.get("hard_issues", []))
+            if isinstance(raw.get("hard_issues", []), list)
+            else []
+        ),
+        "tags": (
+            list(raw.get("tags", []))
+            if isinstance(raw.get("tags", []), list)
+            else []
+        ),
+        "reasons": (
+            list(raw.get("reasons", []))
+            if isinstance(raw.get("reasons", []), list)
+            else []
+        ),
+        "risk_components": (
+            dict(raw.get("risk_components", {}))
+            if isinstance(raw.get("risk_components", {}), dict)
+            else {}
+        ),
+    }
+
+
+def _entry_mode_summary(metadata: dict[str, object], regime_policy: dict[str, object]) -> str:
+    raw = metadata.get("entry_mode") if isinstance(metadata, dict) else None
+    if raw:
+        return str(raw)
+    policy_mode = regime_policy.get("entry_mode")
+    if policy_mode:
+        return str(policy_mode)
+    pending = metadata.get("pending_entry", {}) if isinstance(metadata, dict) else {}
+    if isinstance(pending, dict) and pending.get("outcome") == "triggered":
+        return "pullback_short"
+    return "unknown"
+
+
+def _symbol_health_summary(metadata: dict[str, object], regime_policy: dict[str, object]) -> str:
+    raw = metadata.get("symbol_health") if isinstance(metadata, dict) else None
+    if raw:
+        return str(raw)
+    policy_health = regime_policy.get("symbol_health")
+    if policy_health:
+        return str(policy_health)
+    return "unknown"
+
+
+def _rebound_outcome_summary(metadata: dict[str, object]) -> str:
+    pending = metadata.get("pending_entry", {}) if isinstance(metadata, dict) else {}
+    if not isinstance(pending, dict) or not pending:
+        return "none"
+    if pending.get("outcome"):
+        return str(pending.get("outcome"))
+    if pending.get("triggered_at"):
+        return "triggered"
+    return "pending"
+
+
+def _trade_source(trade: TradeRecord) -> str:
+    metadata = trade.entry_metadata if isinstance(trade.entry_metadata, dict) else {}
+    shadow_type = str(metadata.get("shadow_type", "") or "")
+    if shadow_type == "policy_rejected":
+        return "policy_rejected_shadow"
+    if metadata.get("shadow_trade_id"):
+        return "policy_shadow"
+    if trade.reason == "shadow-feedback" or trade.entry_reason == "shadow-feedback":
+        return "strategy_shadow"
+    return "executed"
+
+
 def _nearest_microstructure_row(
     microstructure_dir: Path | None,
     *,
@@ -468,6 +620,10 @@ def _mistake_tags(
     current_min_signal_strength: float,
     microstructure: dict[str, object],
     ml_learning: dict[str, object],
+    market_regime: str,
+    entry_mode: str,
+    symbol_health: str,
+    rebound_outcome: str,
 ) -> list[str]:
     tags: list[str] = []
     if planned_rr is not None and planned_rr < 1.2:
@@ -503,6 +659,12 @@ def _mistake_tags(
         tags.append("fast-loss")
     if abs(trade.entry_context_score) < 0.05:
         tags.append("low-context-edge-loss")
+    if market_regime == "weak_down_choppy" and trade.direction.value == "short" and entry_mode == "trend_short":
+        tags.append("weak-down-choppy-trend-short-loss")
+    if rebound_outcome == "triggered" and entry_mode == "pullback_short":
+        tags.append("failed-rebound-trigger-loss")
+    if symbol_health == "probation":
+        tags.append("symbol-probation-loss")
     learning_tags = ml_learning.get("learning_tags", [])
     if isinstance(learning_tags, list):
         if LOW_QUALITY_TAG in learning_tags:
@@ -531,26 +693,62 @@ def _mistake_tags(
 
 def _lesson_for_tag(tag: str) -> str:
     lessons = {
-        "poor-reward-risk-plan": "Entry had weak planned reward/risk; prefer setups with cleaner upside versus stop distance.",
+        "poor-reward-risk-plan": (
+            "Entry had weak planned reward/risk; prefer setups with cleaner upside versus stop distance."
+        ),
         "planned-take-profit": "Exit matched the initial profit plan; keep this setup in the evidence pool.",
-        "protected-profit": "Protection logic preserved gains; keep tracking whether trailing parameters are too tight.",
+        "protected-profit": (
+            "Protection logic preserved gains; keep tracking whether trailing parameters are too tight."
+        ),
         "profitable-stop-exit": "Stop acted as profit protection; classify separately from true stop-losses.",
         "flat-trade": "Trade did not pay enough to cover opportunity cost; review entry timing and exit rule.",
         "stop-loss": "Initial trade idea was invalidated by price; review entry filter and stop placement.",
         "trend-flip-after-entry": "Signal reversed after entry; trend filter or confirmation may be too loose.",
-        "forced-session-exit-loss": "Session flattening closed a loser; check whether entries occur too late in the window.",
+        "forced-session-exit-loss": (
+            "Session flattening closed a loser; check whether entries occur too late in the window."
+        ),
         "risk-halt-loss": "Loss happened during risk halt flow; reduce risk until recent expectancy recovers.",
         "weak-signal-loss": "Loss came from a low-strength signal; candidate fix is raising min_signal_strength.",
-        "full-risk-loss": "Trade consumed nearly the full planned risk; position size or setup filter needs tightening.",
+        "full-risk-loss": (
+            "Trade consumed nearly the full planned risk; position size or setup filter needs tightening."
+        ),
         "fast-loss": "Trade failed quickly after entry; entry timing or breakout confirmation is likely weak.",
         "low-context-edge-loss": "Context score was neutral; require stronger context before taking similar trades.",
-        "low-quality-ml-learning-loss": "ML marked this setup as low-quality; keep trading it only as observe-only evidence until enough samples accumulate.",
-        "negative-expectancy-ml-learning-loss": "ML expected negative per-lot expectancy; compare future samples before converting this into a hard rule.",
-        "commission-edge-ml-learning-loss": "ML expected profit did not clear the required net edge after round-turnover commission.",
-        "confirmation-after-impulse-loss": "Entry followed an impulse/reversal candle; require evidence that the next candle confirms continuation before scaling this pattern.",
-        "short-after-exhaustion-loss": "Short was opened after an exhausted down move or rebound; require continuation confirmation or reduce size.",
-        "late-reentry-loss": "Repeated same-direction entry after an earlier winner failed; require a fresh confirmed setup before re-entering.",
-        "no-order-book-at-entry": "Entry had no order book snapshot; the bot could not judge spread, depth, or imbalance.",
+        "low-quality-ml-learning-loss": (
+            "ML marked this setup as low-quality; keep trading it only as observe-only evidence until enough "
+            "samples accumulate."
+        ),
+        "negative-expectancy-ml-learning-loss": (
+            "ML expected negative per-lot expectancy; compare future samples before converting this into a hard rule."
+        ),
+        "commission-edge-ml-learning-loss": (
+            "ML expected profit did not clear the required net edge after round-turnover commission."
+        ),
+        "confirmation-after-impulse-loss": (
+            "Entry followed an impulse/reversal candle; require evidence that the next candle confirms continuation "
+            "before scaling this pattern."
+        ),
+        "short-after-exhaustion-loss": (
+            "Short was opened after an exhausted down move or rebound; require continuation confirmation or "
+            "reduce size."
+        ),
+        "late-reentry-loss": (
+            "Repeated same-direction entry after an earlier winner failed; require a fresh confirmed setup before "
+            "re-entering."
+        ),
+        "weak-down-choppy-trend-short-loss": (
+            "Weak down/choppy regime punished direct trend-short entry; defer until a rebound fails before entering."
+        ),
+        "failed-rebound-trigger-loss": (
+            "Pullback-short trigger still failed; review trigger distance, rebound quality, and stop placement before "
+            "scaling it."
+        ),
+        "symbol-probation-loss": (
+            "Symbol was already under probation; keep reduced size until recent expectancy improves."
+        ),
+        "no-order-book-at-entry": (
+            "Entry had no order book snapshot; the bot could not judge spread, depth, or imbalance."
+        ),
         "wide-spread-entry": "Entry spread was wide; require a tighter book before taking similar trades.",
         "thin-book-entry": "Entry-side depth was thin versus order size; reduce size or skip similar trades.",
         "adverse-book-imbalance": "Order book imbalance was against the trade direction at entry.",
@@ -627,6 +825,41 @@ def _build_recommendations(
             }
         )
 
+    weak_choppy_trend_short_count = tag_counts.get("weak-down-choppy-trend-short-loss", 0)
+    if weak_choppy_trend_short_count >= 1:
+        recommendations.append(
+            {
+                "action": "defer-weak-down-choppy-trend-shorts",
+                "confidence": _confidence(weak_choppy_trend_short_count),
+                "reason": (
+                    "Weak down/choppy losers came from direct trend-short entries; wait for a failed rebound "
+                    "before entry."
+                ),
+                "runtime_policy": {
+                    "regime": "weak_down_choppy",
+                    "blocked_entry_mode": "trend_short",
+                    "allowed_entry_mode": "pullback_short",
+                },
+            }
+        )
+
+    failed_rebound_count = tag_counts.get("failed-rebound-trigger-loss", 0)
+    if failed_rebound_count >= 1:
+        recommendations.append(
+            {
+                "action": "tighten-pullback-short-trigger",
+                "confidence": _confidence(failed_rebound_count),
+                "reason": (
+                    "A deferred pullback-short trigger still lost; require better rebound failure or smaller size."
+                ),
+                "runtime_policy": {
+                    "entry_mode": "pullback_short",
+                    "risk_multiplier_cap": 0.5,
+                    "review_trigger_distance": True,
+                },
+            }
+        )
+
     weak_symbols = _negative_groups(reviews, "symbol", min_trades=2)
     if weak_symbols:
         additions = [item["group"] for item in weak_symbols[:2]]
@@ -634,7 +867,10 @@ def _build_recommendations(
             {
                 "action": "observe-weak-symbols",
                 "confidence": _confidence(max(int(item["trades"]) for item in weak_symbols)),
-                "reason": "One or more symbols show negative recent expectancy; keep them in learning mode instead of blocking.",
+                "reason": (
+                    "One or more symbols show negative recent expectancy; keep them in learning mode instead "
+                    "of blocking."
+                ),
                 "symbols": additions,
             }
         )
@@ -645,7 +881,10 @@ def _build_recommendations(
             {
                 "action": "learn-confirmation-after-impulse",
                 "confidence": _confidence(impulse_loss_count),
-                "reason": "Recent loss followed an impulse/reversal entry; collect more observe-only samples before enforcing confirmation.",
+                "reason": (
+                    "Recent loss followed an impulse/reversal entry; collect more observe-only samples before "
+                    "enforcing confirmation."
+                ),
                 "mode": "observe_only",
                 "blocks_entry": False,
             }
@@ -761,6 +1000,74 @@ def _group_row(group: object, reviews: list[dict[str, object]]) -> dict[str, obj
         "net_pnl_rub": round(sum(pnl_values), 2),
         "expectancy_rub": round(sum(pnl_values) / len(reviews), 2),
         "win_rate_pct": round(len(wins) / len(reviews) * 100, 3),
+    }
+
+
+def _policy_signal_distribution(events: list[dict[str, object]]) -> dict[str, object]:
+    rows: dict[tuple[str, str, str], int] = Counter()
+    relaxed_only = 0
+    total = 0
+    for event in events:
+        if event.get("action") != "signal":
+            continue
+        policy_fields = _event_policy_fields(event)
+        if not policy_fields:
+            continue
+        total += 1
+        if policy_fields.get("relaxed_only_trade"):
+            relaxed_only += 1
+        rows[
+            (
+                str(policy_fields.get("actual_policy_decision", "unknown")),
+                str(policy_fields.get("strict_policy_decision", "unknown")),
+                "approved" if bool(event.get("approved")) else "rejected",
+            )
+        ] += 1
+    return {
+        "total_policy_signals": total,
+        "relaxed_only_signals": relaxed_only,
+        "rows": [
+            {
+                "actual_policy_decision": actual,
+                "strict_policy_decision": strict,
+                "outcome": outcome,
+                "signals": count,
+            }
+            for (actual, strict, outcome), count in sorted(rows.items())
+        ],
+    }
+
+
+def _policy_outcomes(reviews: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "by_trade_source": _group_breakdown(reviews, "trade_source"),
+        "by_actual_policy_decision": _group_breakdown(reviews, "actual_policy_decision"),
+        "by_strict_policy_decision": _group_breakdown(reviews, "strict_policy_decision"),
+        "resolved_shadow_trades": sum(
+            1
+            for review in reviews
+            if str(review.get("trade_source", "")).endswith("shadow")
+            or "shadow" in str(review.get("trade_source", ""))
+        ),
+        "relaxed_only_trades": sum(1 for review in reviews if bool(review.get("relaxed_only_trade"))),
+    }
+
+
+def _event_policy_fields(event: dict[str, object]) -> dict[str, object]:
+    metadata = event.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    policy = metadata.get("regime_policy", metadata.get("regime_policy_audit", {}))
+    if not isinstance(policy, dict):
+        policy = {}
+    actual = event.get("actual_policy_decision", policy.get("actual_policy_decision", policy.get("decision_type")))
+    strict = event.get("strict_policy_decision", policy.get("strict_policy_decision"))
+    if actual is None and strict is None:
+        return {}
+    return {
+        "actual_policy_decision": actual or "unknown",
+        "strict_policy_decision": strict or "unknown",
+        "relaxed_only_trade": event.get("relaxed_only_trade", policy.get("relaxed_only_trade", False)),
     }
 
 
@@ -905,6 +1212,42 @@ def _render_markdown(payload: dict[str, object]) -> str:
             lines.append(f"- {tag}: {count}")
     else:
         lines.append("- No repeated mistake pattern found")
+
+    breakdowns = payload.get("breakdowns", {})
+    dimension_keys = ["market_regime", "entry_mode", "symbol_health", "rebound_outcome"]
+    lines.append("")
+    lines.append("## Dimensions")
+    if isinstance(breakdowns, dict):
+        for key in dimension_keys:
+            rows = breakdowns.get(key, [])
+            if not rows:
+                continue
+            preview = []
+            for row in rows[:3]:
+                preview.append(
+                    f"{row.get('group')}: {row.get('expectancy_rub')} RUB/trade "
+                    f"({row.get('trades')} trades)"
+                )
+            lines.append(f"- {key}: " + "; ".join(preview))
+
+    policy = payload.get("policy_outcomes", {})
+    if isinstance(policy, dict):
+        lines.append("")
+        lines.append("## Policy Outcomes")
+        lines.append(f"- Resolved shadow trades: {policy.get('resolved_shadow_trades', 0)}")
+        lines.append(f"- Relaxed-only trades: {policy.get('relaxed_only_trades', 0)}")
+        for key, label in [
+            ("by_trade_source", "trade_source"),
+            ("by_actual_policy_decision", "actual_policy_decision"),
+        ]:
+            rows = policy.get(key, [])
+            if not rows:
+                continue
+            preview = [
+                f"{row.get('group')}: {row.get('expectancy_rub')} RUB/trade ({row.get('trades')} trades)"
+                for row in rows[:3]
+            ]
+            lines.append(f"- {label}: " + "; ".join(preview))
 
     lines.append("")
     lines.append("## Recommendations")

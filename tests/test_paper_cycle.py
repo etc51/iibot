@@ -4,15 +4,68 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+from samosbor.autonomy.market_regime import MarketRegime
+from samosbor.autonomy.regime_policy import PolicyDecisionType
 from samosbor.autonomy.signal_feedback import signal_feedback_path
 from samosbor.autonomy.trade_review import trade_review_path
 from samosbor.config import load_config
 from samosbor.domain import Candle, ExitReason, Instrument, InstrumentType, Signal, SignalDirection
 from samosbor.execution.paper import LocalPaperBroker
 from samosbor.orchestrator import TradingOrchestrator
+
+
+def _write_basic_paper_config(
+    root: Path,
+    *,
+    symbol: str = "SBER",
+    strategy_lines: list[str] | None = None,
+) -> Path:
+    config_dir = root / "configs"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "paper.toml"
+    strategy_lines = strategy_lines or ["min_liquidity_rub = 1.0"]
+    config_path.write_text(
+        "\n".join(
+            [
+                "[app]",
+                'timezone = "Europe/Moscow"',
+                "",
+                "[data]",
+                'source = "csv"',
+                'csv_path = "data/demo.csv"',
+                'timeframe = "30min"',
+                "",
+                "[[data.instruments]]",
+                f'symbol = "{symbol}"',
+                'instrument_type = "stock"',
+                "lot_size = 1",
+                "",
+                "[strategy]",
+                *strategy_lines,
+                "",
+                "[execution]",
+                'mode = "local-paper"',
+                "allow_live_trading = false",
+                'state_path = "state/paper_state.json"',
+                "",
+                "[backtest]",
+                "initial_cash = 100000",
+                "",
+                "[reporting]",
+                'output_dir = "runs"',
+                "",
+                "[research]",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return config_path
 
 
 class _FakeProvider:
@@ -504,6 +557,63 @@ class PaperCycleTrailingProtectionTest(unittest.TestCase):
 
 
 class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
+    def test_learning_mode_daily_trade_cap_uses_configured_limit(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8")
+                + "\n".join(
+                    [
+                        "[learning_mode]",
+                        "enabled = true",
+                        'profile = "relaxed_paper_learning"',
+                        "",
+                        "[learning_risk.probe]",
+                        "risk_multiplier = 0.3",
+                        "max_positions = 5",
+                        "max_trades_per_day = 1",
+                        "",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            broker = LocalPaperBroker.fresh(
+                config.backtest.initial_cash,
+                slippage_bps=config.execution.slippage_bps,
+                commission_bps=config.execution.commission_bps,
+            )
+            timestamp = datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc)
+            broker.events.append(
+                {
+                    "timestamp": timestamp.isoformat(),
+                    "action": "signal",
+                    "approved": True,
+                    "actual_policy_decision": PolicyDecisionType.PROBE_TRADE.value,
+                }
+            )
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            signal = Signal(
+                instrument=instrument,
+                direction=SignalDirection.SHORT,
+                strength=0.6,
+                entry_price=100.0,
+                stop_price=101.0,
+                take_profit=98.0,
+                reason="probe",
+                metadata={"regime_policy": {"decision_type": PolicyDecisionType.PROBE_TRADE.value}},
+            )
+
+            reason = TradingOrchestrator(config)._learning_mode_limit_reason(
+                broker,
+                signal,
+                timestamp=timestamp,
+            )
+
+            self.assertEqual(reason, "entry blocked by probe learning daily trade cap")
+
     def test_paper_cycle_summary_includes_signal_rejection_breakdown(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -664,7 +774,7 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
                 {"entry blocked by wide spread (20.00 bps)": 1},
             )
 
-    def test_paper_cycle_blocks_entry_when_ml_edge_is_negative(self):
+    def test_paper_cycle_reduces_entry_size_when_ml_edge_is_negative(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             config_dir = root / "configs"
@@ -725,6 +835,62 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
 
             result = orchestrator.run_paper_cycle()
             summary = json.loads((Path(result["output_dir"]) / "cycle_summary.json").read_text(encoding="utf-8"))
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+            signal_event = next(event for event in cycle_events if event["action"] == "signal")
+            state = LocalPaperBroker.load(
+                config.resolve_path(config.execution.state_path),
+                initial_cash=config.backtest.initial_cash,
+                slippage_bps=config.execution.slippage_bps,
+                commission_bps=config.execution.commission_bps,
+            )
+
+            self.assertEqual(summary["signals_total"], 1)
+            self.assertEqual(summary["signals_approved"], 1)
+            self.assertEqual(summary["signal_rejection_reason_breakdown"], {})
+            self.assertTrue(signal_event["approved"])
+            self.assertEqual(signal_event["quantity_lots"], max(1, int(signal_event["original_quantity_lots"] * 0.25)))
+            position = state.portfolio.positions["SBER"]
+            self.assertEqual(position.quantity_lots, signal_event["quantity_lots"])
+            self.assertEqual(position.entry_metadata["ml_sizing"]["requested_scale"], 0.25)
+            self.assertEqual(
+                position.entry_metadata["ml_sizing"]["adjusted_quantity_lots"],
+                signal_event["quantity_lots"],
+            )
+
+    def test_paper_cycle_defers_weak_down_choppy_short_to_pending_pullback(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            config = load_config(config_path)
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            latest_candle = Candle(
+                timestamp=datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc),
+                open=100.4,
+                high=100.6,
+                low=99.8,
+                close=100.0,
+                volume=5_000_000,
+            )
+            orchestrator = _PlainShortCycleOrchestrator(
+                config,
+                _FakeProvider([instrument], {"SBER": [latest_candle]}),
+            )
+            regime = MarketRegime("weak_down_choppy", 0.82, {"breadth_down": 0.7, "chop_score": 0.8})
+
+            with patch("samosbor.orchestrator.detect_market_regime", return_value=regime):
+                result = orchestrator.run_paper_cycle()
+
+            summary = json.loads((Path(result["output_dir"]) / "cycle_summary.json").read_text(encoding="utf-8"))
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+            signal_event = next(event for event in cycle_events if event["action"] == "signal")
+            pending_event = next(event for event in cycle_events if event["action"] == "pending-entry")
+            feedback = json.loads(
+                signal_feedback_path(config.resolve_path(config.execution.state_path)).read_text(encoding="utf-8")
+            )
             state = LocalPaperBroker.load(
                 config.resolve_path(config.execution.state_path),
                 initial_cash=config.backtest.initial_cash,
@@ -734,11 +900,74 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
 
             self.assertEqual(summary["signals_total"], 1)
             self.assertEqual(summary["signals_approved"], 0)
+            self.assertFalse(signal_event["approved"])
+            self.assertEqual(signal_event["metadata"]["regime_policy"]["entry_mode"], "wait")
+            self.assertEqual(signal_event["reason"], "entry deferred for pullback short")
+            self.assertEqual(pending_event["status"], "created")
+            self.assertEqual(feedback["pending_entries"][0]["state"], "WAIT_PULLBACK_SHORT")
             self.assertEqual(len(state.portfolio.positions), 0)
-            self.assertEqual(
-                summary["signal_rejection_reason_breakdown"],
-                {"entry blocked by ML negative edge (p=0.16, expected=-50.00 RUB, required=20.00 RUB)": 1},
+
+    def test_paper_cycle_opens_pending_pullback_short_after_failed_rebound(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            config = load_config(config_path)
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            first_candle = Candle(
+                timestamp=datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc),
+                open=100.4,
+                high=100.6,
+                low=99.8,
+                close=100.0,
+                volume=5_000_000,
             )
+            regime = MarketRegime("weak_down_choppy", 0.82, {"breadth_down": 0.7, "chop_score": 0.8})
+            first_orchestrator = _PlainShortCycleOrchestrator(
+                config,
+                _FakeProvider([instrument], {"SBER": [first_candle]}),
+            )
+            with patch("samosbor.orchestrator.detect_market_regime", return_value=regime):
+                first_orchestrator.run_paper_cycle()
+
+            trigger_candle = Candle(
+                timestamp=datetime(2025, 1, 1, 11, 30, tzinfo=timezone.utc),
+                open=100.35,
+                high=100.45,
+                low=99.75,
+                close=99.9,
+                volume=5_000_000,
+            )
+            second_orchestrator = _NoSignalPaperCycleOrchestrator(
+                config,
+                _FakeProvider([instrument], {"SBER": [first_candle, trigger_candle]}),
+            )
+            with patch("samosbor.orchestrator.detect_market_regime", return_value=regime):
+                result = second_orchestrator.run_paper_cycle()
+
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+            pending_event = next(event for event in cycle_events if event["action"] == "pending-entry")
+            signal_event = next(event for event in cycle_events if event["action"] == "signal")
+            feedback = json.loads(
+                signal_feedback_path(config.resolve_path(config.execution.state_path)).read_text(encoding="utf-8")
+            )
+            state = LocalPaperBroker.load(
+                config.resolve_path(config.execution.state_path),
+                initial_cash=config.backtest.initial_cash,
+                slippage_bps=config.execution.slippage_bps,
+                commission_bps=config.execution.commission_bps,
+            )
+
+            self.assertEqual(pending_event["status"], "triggered")
+            self.assertTrue(signal_event["approved"])
+            self.assertEqual(signal_event["metadata"]["entry_mode"], "pullback_short")
+            self.assertEqual(signal_event["metadata"]["pending_entry"]["outcome"], "triggered")
+            self.assertEqual(feedback["pending_entries"], [])
+            position = state.portfolio.positions["SBER"]
+            self.assertEqual(position.direction, SignalDirection.SHORT)
+            expected_fill = trigger_candle.close / (1 + config.execution.slippage_bps / 10000)
+            self.assertAlmostEqual(position.entry_price, expected_fill)
 
     def test_paper_cycle_observes_short_exhaustion_without_blocking_entry(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -955,6 +1184,81 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
                 summary["signal_rejection_reason_breakdown"],
                 {"entry blocked by 5min confirmation (5m rebound against short)": 1},
             )
+
+    def test_paper_cycle_records_market_regime_audit_event(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_dir = root / "configs"
+            config_dir.mkdir(parents=True)
+            config_path = config_dir / "paper.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[app]",
+                        'timezone = "Europe/Moscow"',
+                        "",
+                        "[data]",
+                        'source = "csv"',
+                        'csv_path = "data/demo.csv"',
+                        'timeframe = "15min"',
+                        "",
+                        "[[data.instruments]]",
+                        'symbol = "YDEX"',
+                        'instrument_type = "stock"',
+                        "lot_size = 1",
+                        "",
+                        "[strategy]",
+                        "min_liquidity_rub = 1.0",
+                        "",
+                        "[execution]",
+                        'mode = "local-paper"',
+                        "allow_live_trading = false",
+                        'state_path = "state/paper_state.json"',
+                        "",
+                        "[backtest]",
+                        "initial_cash = 100000",
+                        "",
+                        "[reporting]",
+                        'output_dir = "runs"',
+                        "",
+                        "[research]",
+                        "",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+            instrument = Instrument(symbol="YDEX", instrument_type=InstrumentType.STOCK, lot_size=1)
+            start = datetime(2025, 1, 1, 7, 0, tzinfo=timezone.utc)
+            candles = [
+                Candle(
+                    timestamp=start + timedelta(minutes=15 * index),
+                    open=100.0 + index * 0.1,
+                    high=101.0 + index * 0.1,
+                    low=99.0 + index * 0.1,
+                    close=100.0 + index * 0.1,
+                    volume=5_000_000,
+                )
+                for index in range(60)
+            ]
+            orchestrator = _EntrySignalCycleOrchestrator(
+                config,
+                _FakeProvider([instrument], {"YDEX": candles}),
+            )
+
+            result = orchestrator.run_paper_cycle()
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+
+            regime_event = cycle_events[0]
+            self.assertEqual(regime_event["event"], "market_regime_detected")
+            self.assertIn(regime_event["regime"], {"unknown", "clean_uptrend", "mixed"})
+            signal_event = next(event for event in cycle_events if event.get("action") == "signal")
+            self.assertIn("market_regime", signal_event["metadata"])
+            self.assertIn("regime_policy_audit", signal_event["metadata"])
 
     def test_paper_cycle_records_shadow_evidence_outside_runtime_entry_hours(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

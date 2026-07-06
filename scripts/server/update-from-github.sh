@@ -12,15 +12,19 @@ if ! flock -n 9; then
 fi
 
 current_commit="$(git rev-parse HEAD)"
-git fetch origin main
-remote_commit="$(git rev-parse origin/main)"
+branch="$(git branch --show-current)"
+if [[ -z "$branch" ]]; then
+  branch="master"
+fi
+git fetch origin "$branch"
+remote_commit="$(git rev-parse "origin/$branch")"
 
 if [[ "$current_commit" == "$remote_commit" ]]; then
   echo "already up to date: $current_commit"
   exit 0
 fi
 
-git pull --ff-only origin main
+git pull --ff-only origin "$branch"
 source "$ROOT_DIR/.venv/bin/activate"
 python -m pip install -r requirements-tbank.txt
 python -m pip install -e .
