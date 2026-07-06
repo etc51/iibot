@@ -88,6 +88,7 @@ def build_minimal_dashboard_payload(config_path: str | Path) -> dict[str, object
         "recent_trades": trades,
         "recent_events": events,
         "trade_review": {
+            "commit_hash": str(trade_review.get("commit_hash", "")),
             "reviewed_trades": int(trade_review.get("reviewed_trades", 0)),
             "summary": dict(trade_review.get("summary", {})),
             "mistake_breakdown": dict(trade_review.get("mistake_breakdown", {})),
@@ -224,7 +225,7 @@ def render_minimal_dashboard_html(payload: dict[str, object]) -> str:
 
     <section class="wide">
       <h2>Trade Review</h2>
-      <div class="sub">Reviewed trades: {_escape(str(trade_review.get("reviewed_trades", 0)))}</div>
+      <div class="sub">Reviewed trades: {_escape(str(trade_review.get("reviewed_trades", 0)))} | commit {_escape(str(trade_review.get("commit_hash", ""))[:12] or "-")}</div>
       <div style="height:10px"></div>
       {mistakes_html}
       <div style="height:10px"></div>

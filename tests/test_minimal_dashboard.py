@@ -7,6 +7,7 @@ from samosbor.minimal_dashboard import (
     _portfolio_equity,
     _positions_from_state,
     _request_path,
+    render_minimal_dashboard_html,
     _trades_table,
 )
 
@@ -117,3 +118,42 @@ def test_api_recent_trades_normalizes_positive_stop_loss_reason():
 def test_request_path_ignores_refresh_query_string():
     assert _request_path("/?ts=123") == "/"
     assert _request_path("/api/status?ts=123") == "/api/status"
+
+
+def test_trade_review_commit_hash_is_rendered():
+    payload = {
+        "generated_at": "2026-07-06T20:00:00+00:00",
+        "commit_hash": "9ae34114961e2d5178ad4c83ccbd0745bf7c1adb",
+        "config": {"mode": "local-paper", "allow_live_trading": False},
+        "market_data": {"live_prices": 0},
+        "loop": {"running": False, "status": "stopped", "pid": "-"},
+        "account": {
+            "equity_rub": 100000.0,
+            "cash_rub": 100000.0,
+            "gross_exposure_rub": 0.0,
+            "realized_pnl_rub": 0.0,
+            "open_pnl_rub": 0.0,
+            "open_positions": 0,
+            "closed_positions": 0,
+            "trading_halted": False,
+        },
+        "latest_cycle": {},
+        "target": {"daily_rub": 1000.0, "progress_pct": 0.0},
+        "positions": [],
+        "recent_trades": [],
+        "recent_events": [],
+        "trade_review": {
+            "commit_hash": "9ae34114961e2d5178ad4c83ccbd0745bf7c1adb",
+            "reviewed_trades": 0,
+            "summary": {},
+            "mistake_breakdown": {},
+            "recommendations": [],
+            "config_patch_candidates": {},
+        },
+        "paths": {},
+        "log_tail": [],
+    }
+
+    html = render_minimal_dashboard_html(payload)
+
+    assert "commit 9ae34114961e" in html
