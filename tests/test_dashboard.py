@@ -88,6 +88,23 @@ class DashboardTest(unittest.TestCase):
                                     "signal_strength": 0.8,
                                     "opened_at": "2026-06-15T09:00:00+00:00",
                                     "updated_at": "2026-06-15T09:30:00+00:00",
+                                },
+                                "ROSN": {
+                                    "instrument": {
+                                        "symbol": "ROSN",
+                                        "instrument_type": "stock",
+                                        "lot_size": 10,
+                                    },
+                                    "direction": "short",
+                                    "quantity_lots": 0,
+                                    "entry_price": 301.6293,
+                                    "current_price": 299.15,
+                                    "stop_price": 305.6446,
+                                    "take_profit": 292.0134,
+                                    "margin_requirement": 0.0,
+                                    "signal_strength": 0.68,
+                                    "opened_at": "2026-06-15T09:00:00+00:00",
+                                    "updated_at": "2026-06-15T09:30:00+00:00",
                                 }
                             },
                         },
@@ -116,6 +133,7 @@ class DashboardTest(unittest.TestCase):
             payload = build_dashboard_payload(config_path)
             html = render_dashboard_html(payload)
 
+            self.assertEqual([row["symbol"] for row in payload["runtime"]["positions"]], ["SBER"])
             position = payload["runtime"]["positions"][0]
             self.assertEqual(position["trailing_status"], "active")
             self.assertAlmostEqual(position["trailing_breakeven_trigger_pct"], 0.5)

@@ -87,6 +87,12 @@ def build_trade_review_payload(
         },
         "policy_signal_distribution": _policy_signal_distribution(parsed_events),
         "policy_outcomes": _policy_outcomes(reviews),
+        "weak_choppy_direct_probe_review": _weak_choppy_direct_probe_review(reviews, parsed_events),
+        "long_learning_review": _long_learning_review(reviews, parsed_events),
+        "strict_vs_relaxed": _strict_vs_relaxed_review(reviews, parsed_events),
+        "blocker_review": _blocker_review(parsed_events),
+        "learning_caps": _learning_cap_metrics(reviews, parsed_events),
+        "selloff_learning_caps": _selloff_learning_cap_metrics(reviews, parsed_events),
         "mistake_breakdown": _mistake_breakdown(reviews),
         "recommendations": recommendations["items"],
         "config_patch_candidates": recommendations["config_patch_candidates"],
@@ -132,6 +138,7 @@ def _review_trade(
     post_close_analysis = _post_close_analysis_summary(trade.entry_metadata)
     market_regime = _market_regime_summary(trade.entry_metadata)
     regime_policy = _regime_policy_summary(trade.entry_metadata)
+    learning_caps = _learning_caps_summary(trade.entry_metadata, regime_policy)
     entry_mode = _entry_mode_summary(trade.entry_metadata, regime_policy)
     symbol_health = _symbol_health_summary(trade.entry_metadata, regime_policy)
     rebound_outcome = _rebound_outcome_summary(trade.entry_metadata)
@@ -184,6 +191,7 @@ def _review_trade(
         "soft_issues": regime_policy.get("soft_issues", []),
         "hard_issues": regime_policy.get("hard_issues", []),
         "regime_policy": regime_policy,
+        "learning_caps": learning_caps,
         "entry_ml_learning": ml_learning,
         "post_close_analysis": post_close_analysis,
         "entry_microstructure": microstructure,
@@ -459,6 +467,44 @@ def _regime_policy_summary(metadata: dict[str, object]) -> dict[str, object]:
             if isinstance(raw.get("risk_components", {}), dict)
             else {}
         ),
+    }
+
+
+def _learning_caps_summary(metadata: dict[str, object], regime_policy: dict[str, object]) -> dict[str, object]:
+    raw: object = {}
+    if isinstance(metadata, dict):
+        raw = metadata.get("learning_caps", {})
+    if not isinstance(raw, dict) or not raw:
+        raw = regime_policy.get("learning_caps", {}) if isinstance(regime_policy, dict) else {}
+    if not isinstance(raw, dict) or not raw:
+        return {
+            "available": False,
+            "oversampling_tags": [],
+            "daily_cap_hit": False,
+            "same_symbol_cap_hit": False,
+            "same_entry_mode_cap_hit": False,
+            "same_regime_cap_hit": False,
+            "cap_behavior_applied": "none",
+        }
+    tags = raw.get("oversampling_tags", [])
+    return {
+        "available": True,
+        "mode": str(raw.get("mode", "")),
+        "decision_type": str(raw.get("decision_type", "")),
+        "probe_count_today": int(raw.get("probe_count_today", 0) or 0),
+        "exploration_count_today": int(raw.get("exploration_count_today", 0) or 0),
+        "same_symbol_count_today": int(raw.get("same_symbol_count_today", 0) or 0),
+        "same_entry_mode_count_today": int(raw.get("same_entry_mode_count_today", 0) or 0),
+        "same_regime_count_today": int(raw.get("same_regime_count_today", 0) or 0),
+        "daily_cap_hit": bool(raw.get("daily_cap_hit", False)),
+        "same_symbol_cap_hit": bool(raw.get("same_symbol_cap_hit", False)),
+        "same_entry_mode_cap_hit": bool(raw.get("same_entry_mode_cap_hit", False)),
+        "same_regime_cap_hit": bool(raw.get("same_regime_cap_hit", False)),
+        "cap_behavior_applied": str(raw.get("cap_behavior_applied", "none") or "none"),
+        "oversampling_tags": list(tags) if isinstance(tags, list) else [],
+        "original_quantity_lots": int(raw.get("original_quantity_lots", 0) or 0),
+        "adjusted_quantity_lots": int(raw.get("adjusted_quantity_lots", 0) or 0),
+        "size_multiplier": float(raw.get("size_multiplier", 1.0) or 0.0),
     }
 
 
@@ -1053,6 +1099,367 @@ def _policy_outcomes(reviews: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
+def _weak_choppy_direct_probe_review(
+    reviews: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    signal_events = [event for event in events if event.get("action") == "signal"]
+    weak_signals = [event for event in signal_events if _event_regime(event) == "weak_down_choppy"]
+    pending_events = [event for event in events if event.get("action") == "pending-entry"]
+    weak_reviews = [review for review in reviews if review.get("market_regime") == "weak_down_choppy"]
+    return {
+        "weak_down_choppy_signals_total": len(weak_signals),
+        "weak_down_choppy_wait_only_count": sum(
+            1
+            for event in weak_signals
+            if _event_entry_mode(event) == "wait"
+            or _event_policy_fields(event).get("actual_policy_decision") == "wait_pullback"
+        ),
+        "weak_down_choppy_probe_now_count": sum(
+            1 for event in weak_signals if _event_entry_mode(event) == "weak_choppy_direct_probe_short"
+        ),
+        "weak_down_choppy_exploration_now_count": sum(
+            1 for event in weak_signals if _event_entry_mode(event) == "weak_choppy_direct_exploration_short"
+        ),
+        "weak_down_choppy_pending_addon_created_count": sum(
+            1 for event in pending_events if _pending_event_is_addon(event) and event.get("status") == "created"
+        ),
+        "weak_down_choppy_pending_addon_executed_count": sum(
+            1
+            for review in reviews
+            if review.get("entry_mode") == "pullback_short"
+            and _review_pending_entry(review).get("is_addon", False)
+        ),
+        "weak_down_choppy_pending_addon_expired_count": sum(
+            1 for event in pending_events if _pending_event_is_addon(event) and event.get("status") == "expired"
+        ),
+        "strict_wait_relaxed_probe_count": sum(
+            1
+            for event in weak_signals
+            if _event_policy_fields(event).get("strict_policy_decision") == "wait"
+            and _event_policy_fields(event).get("actual_policy_decision")
+            in {"probe_trade", "exploration_trade"}
+        ),
+        "pnl_by_entry_mode": _pnl_by_entry_modes(
+            weak_reviews,
+            [
+                "weak_choppy_direct_probe_short",
+                "weak_choppy_direct_exploration_short",
+                "wait_pullback_short",
+                "pullback_short",
+            ],
+        ),
+    }
+
+
+def _long_learning_review(
+    reviews: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    long_signal_events = [
+        event
+        for event in events
+        if event.get("action") == "signal" and str(event.get("direction", event.get("side", ""))) == "long"
+    ]
+    long_reviews = [review for review in reviews if review.get("direction") == "long"]
+    return {
+        "long_signals_total": len(long_signal_events),
+        "long_normal_count": _count_signal_decision(long_signal_events, "normal_trade"),
+        "long_probe_count": _count_signal_decision(long_signal_events, "probe_trade"),
+        "long_exploration_count": _count_signal_decision(long_signal_events, "exploration_trade"),
+        "long_shadow_only_count": _count_signal_decision(long_signal_events, "shadow_only"),
+        "long_rejected_count": sum(1 for event in long_signal_events if not bool(event.get("approved", False))),
+        "long_pnl_total": _pnl_for_reviews(long_reviews),
+        "long_pnl_by_regime": _group_breakdown(long_reviews, "market_regime") if long_reviews else [],
+        "long_pnl_by_entry_mode": _group_breakdown(long_reviews, "entry_mode") if long_reviews else [],
+        "long_win_rate_by_entry_mode": _group_breakdown(long_reviews, "entry_mode") if long_reviews else [],
+        "long_probe_pnl": _pnl_for_reviews(
+            [review for review in long_reviews if review.get("actual_policy_decision") == "probe_trade"]
+        ),
+        "long_exploration_pnl": _pnl_for_reviews(
+            [review for review in long_reviews if review.get("actual_policy_decision") == "exploration_trade"]
+        ),
+        "clean_uptrend_long_pnl": _pnl_for_reviews(
+            [review for review in long_reviews if review.get("market_regime") == "clean_uptrend"]
+        ),
+        "weak_down_choppy_rebound_long_pnl": _pnl_for_reviews(
+            [
+                review
+                for review in long_reviews
+                if review.get("entry_mode") in {"rebound_probe_long", "rebound_exploration_long"}
+            ]
+        ),
+        "range_chop_failed_breakdown_long_pnl": _pnl_for_reviews(
+            [review for review in long_reviews if review.get("entry_mode") == "range_failed_breakdown_long"]
+        ),
+        "capitulation_bounce_long_pnl": _pnl_for_reviews(
+            [review for review in long_reviews if review.get("entry_mode") == "capitulation_bounce_probe_long"]
+        ),
+    }
+
+
+def _strict_vs_relaxed_review(
+    reviews: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    relaxed_reviews = [review for review in reviews if bool(review.get("relaxed_only_trade", False))]
+    strict_wait_relaxed = [
+        review
+        for review in relaxed_reviews
+        if review.get("strict_policy_decision") == "wait"
+        and review.get("actual_policy_decision") in {"probe_trade", "exploration_trade", "normal_trade"}
+    ]
+    strict_reject_long_probe = [
+        review
+        for review in relaxed_reviews
+        if review.get("direction") == "long"
+        and review.get("strict_policy_decision") == "reject"
+        and review.get("actual_policy_decision") in {"probe_trade", "exploration_trade"}
+    ]
+    signal_events = [event for event in events if event.get("action") == "signal"]
+    return {
+        "strict_wait_but_relaxed_traded_count": len(strict_wait_relaxed),
+        "strict_wait_but_relaxed_traded_pnl": _pnl_for_reviews(strict_wait_relaxed),
+        "strict_reject_but_relaxed_long_probe_count": len(strict_reject_long_probe),
+        "strict_reject_but_relaxed_long_probe_pnl": _pnl_for_reviews(strict_reject_long_probe),
+        "relaxed_only_trade_count": len(relaxed_reviews),
+        "relaxed_only_trade_pnl": _pnl_for_reviews(relaxed_reviews),
+        "strict_wait_relaxed_signal_count": sum(
+            1
+            for event in signal_events
+            if _event_policy_fields(event).get("strict_policy_decision") == "wait"
+            and _event_policy_fields(event).get("actual_policy_decision")
+            in {"probe_trade", "exploration_trade", "normal_trade"}
+        ),
+    }
+
+
+def _blocker_review(events: list[dict[str, object]]) -> dict[str, object]:
+    signal_events = [event for event in events if event.get("action") == "signal"]
+    cap_actions = {"learning_cap_warning", "learning_cap_shadow_only", "learning_cap_reduce_size"}
+    return {
+        "ml_blocked_count": sum(
+            1
+            for event in signal_events
+            if _event_ml_blocks(event) and not bool(event.get("approved", False))
+        ),
+        "caps_blocked_count": sum(1 for event in events if str(event.get("action", "")) in cap_actions),
+        "regime_wait_only_count": sum(
+            1
+            for event in signal_events
+            if _event_entry_mode(event) == "wait"
+            or _event_policy_fields(event).get("actual_policy_decision") == "wait_pullback"
+        ),
+        "hard_risk_blocked_count": sum(
+            1
+            for event in signal_events
+            if not bool(event.get("approved", False))
+            and any(token in str(event.get("reason", "")) for token in ["risk", "exposure", "cash", "positions"])
+        ),
+        "hard_execution_blocked_count": sum(
+            1
+            for event in signal_events
+            if bool(_event_hard_issues(event)) or "execution" in str(event.get("reason", ""))
+        ),
+        "soft_issue_reduced_size_count": sum(
+            1
+            for event in signal_events
+            if bool(_event_soft_issues(event))
+            and _event_policy_fields(event).get("actual_policy_decision") in {"probe_trade", "exploration_trade"}
+        ),
+    }
+
+
+def _learning_cap_metrics(
+    reviews: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    cap_events = _learning_cap_events(events)
+    event_caps = [_event_learning_caps(event) for event in cap_events]
+    review_caps = [
+        review.get("learning_caps", {})
+        for review in reviews
+        if isinstance(review.get("learning_caps", {}), dict)
+        and bool(review.get("learning_caps", {}).get("available"))
+    ]
+    all_caps = [caps for caps in [*event_caps, *review_caps] if isinstance(caps, dict) and caps]
+    behavior_counts = Counter(str(caps.get("cap_behavior_applied", "none") or "none") for caps in all_caps)
+    tag_counts = Counter(
+        tag
+        for caps in all_caps
+        for tag in caps.get("oversampling_tags", [])
+        if isinstance(caps.get("oversampling_tags", []), list)
+    )
+    cap_event_counts = _count_cap_events(cap_events)
+    same_symbol_reviews = _reviews_with_learning_tag(reviews, "same_symbol_learning_cap_hit")
+    same_entry_mode_reviews = _reviews_with_learning_tag(reviews, "same_entry_mode_learning_cap_hit")
+    same_regime_reviews = _reviews_with_learning_tag(reviews, "same_regime_learning_cap_hit")
+    return {
+        "available": bool(all_caps or cap_events),
+        "trades_with_learning_caps": len(review_caps),
+        "events_with_learning_caps": len(cap_events),
+        "probe_trades_per_day": max(
+            [int(caps.get("probe_count_today", 0) or 0) for caps in all_caps],
+            default=0,
+        ),
+        "exploration_trades_per_day": max(
+            [int(caps.get("exploration_count_today", 0) or 0) for caps in all_caps],
+            default=0,
+        ),
+        "probe_daily_cap_hits": sum(
+            1
+            for caps in all_caps
+            if bool(caps.get("daily_cap_hit")) and str(caps.get("mode", "")) == "probe"
+        ),
+        "exploration_daily_cap_hits": sum(
+            1
+            for caps in all_caps
+            if bool(caps.get("daily_cap_hit")) and str(caps.get("mode", "")) == "exploration"
+        ),
+        "same_symbol_cap_hits": sum(1 for caps in all_caps if bool(caps.get("same_symbol_cap_hit"))),
+        "same_entry_mode_cap_hits": sum(1 for caps in all_caps if bool(caps.get("same_entry_mode_cap_hit"))),
+        "same_regime_cap_hits": sum(1 for caps in all_caps if bool(caps.get("same_regime_cap_hit"))),
+        "oversampling_tags": dict(sorted(tag_counts.items())),
+        "cap_behavior_counts": dict(sorted(behavior_counts.items())),
+        "warning_events": cap_event_counts.get("learning_cap_warning", 0),
+        "shadow_only_events": cap_event_counts.get("learning_cap_shadow_only", 0),
+        "reduce_size_events": cap_event_counts.get("learning_cap_reduce_size", 0),
+        "unresolved_shadow_only_events": _unresolved_shadow_count(cap_events),
+        "same_symbol_cap_pnl": _pnl_for_reviews(same_symbol_reviews),
+        "same_entry_mode_cap_pnl": _pnl_for_reviews(same_entry_mode_reviews),
+        "same_regime_cap_pnl": _pnl_for_reviews(same_regime_reviews),
+    }
+
+
+def _selloff_learning_cap_metrics(
+    reviews: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    selloff_events = [
+        event
+        for event in events
+        if str(event.get("action", "")).startswith("selloff_learning_cap")
+        or bool(_event_learning_caps(event, key="selloff_learning_caps"))
+    ]
+    event_caps = [_event_learning_caps(event, key="selloff_learning_caps") for event in selloff_events]
+    review_caps = [
+        review.get("selloff_learning_caps", {})
+        for review in reviews
+        if isinstance(review.get("selloff_learning_caps", {}), dict)
+    ]
+    all_caps = [caps for caps in [*event_caps, *review_caps] if isinstance(caps, dict) and caps]
+    cap_event_counts = _count_cap_events(selloff_events)
+    return {
+        "available": bool(all_caps or selloff_events),
+        "events_with_selloff_learning_caps": len(selloff_events),
+        "selloff_positions_used": max(
+            [int(caps.get("selloff_positions_count", caps.get("selloff_positions_used", 0)) or 0) for caps in all_caps],
+            default=0,
+        ),
+        "selloff_new_shorts_per_cycle_max_observed": max(
+            [
+                int(caps.get("new_selloff_shorts_this_cycle", caps.get("new_shorts_this_cycle", 0)) or 0)
+                for caps in all_caps
+            ],
+            default=0,
+        ),
+        "selloff_same_symbol_cap_hits": sum(
+            1
+            for caps in all_caps
+            if bool(caps.get("same_symbol_selloff_cap_hit", caps.get("same_symbol_cap_hit", False)))
+        ),
+        "selloff_same_entry_mode_cap_hits": sum(
+            1
+            for caps in all_caps
+            if bool(caps.get("same_entry_mode_selloff_cap_hit", caps.get("same_entry_mode_cap_hit", False)))
+        ),
+        "selloff_same_regime_cap_hits": sum(
+            1
+            for caps in all_caps
+            if bool(caps.get("same_regime_selloff_cap_hit", caps.get("same_regime_cap_hit", False)))
+        ),
+        "warning_events": cap_event_counts.get("selloff_learning_cap_warning", 0),
+        "shadow_only_events": cap_event_counts.get("selloff_learning_cap_shadow_only", 0),
+        "reduce_size_events": cap_event_counts.get("selloff_learning_cap_reduce_size", 0),
+        "unresolved_shadow_only_events": _unresolved_shadow_count(selloff_events),
+    }
+
+
+def _learning_cap_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
+    actions = {
+        "learning_cap_warning",
+        "learning_cap_shadow_only",
+        "learning_cap_reduce_size",
+    }
+    return [
+        event
+        for event in events
+        if str(event.get("action", "")) in actions or bool(_event_learning_caps(event))
+    ]
+
+
+def _event_learning_caps(
+    event: dict[str, object],
+    *,
+    key: str = "learning_caps",
+) -> dict[str, object]:
+    metadata = event.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    candidates: list[object] = [
+        event.get(key),
+        metadata.get(key),
+    ]
+    policy = metadata.get("regime_policy", metadata.get("regime_policy_audit", {}))
+    if isinstance(policy, dict):
+        candidates.append(policy.get(key))
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate:
+            return dict(candidate)
+    return {}
+
+
+def _count_cap_events(events: list[dict[str, object]]) -> dict[str, int]:
+    return dict(sorted(Counter(str(event.get("action", "")) for event in events).items()))
+
+
+def _reviews_with_learning_tag(
+    reviews: list[dict[str, object]],
+    tag: str,
+) -> list[dict[str, object]]:
+    matching: list[dict[str, object]] = []
+    for review in reviews:
+        caps = review.get("learning_caps", {})
+        if not isinstance(caps, dict):
+            continue
+        tags = caps.get("oversampling_tags", [])
+        if isinstance(tags, list) and tag in tags:
+            matching.append(review)
+    return matching
+
+
+def _pnl_for_reviews(reviews: list[dict[str, object]]) -> dict[str, object]:
+    if not reviews:
+        return {
+            "trades": 0,
+            "net_pnl_rub": 0.0,
+            "expectancy_rub": 0.0,
+            "win_rate_pct": 0.0,
+        }
+    pnl_values = [float(review.get("net_pnl_rub", 0.0) or 0.0) for review in reviews]
+    wins = [value for value in pnl_values if value > 0]
+    return {
+        "trades": len(reviews),
+        "net_pnl_rub": round(sum(pnl_values), 2),
+        "expectancy_rub": round(sum(pnl_values) / len(reviews), 2),
+        "win_rate_pct": round(len(wins) / len(reviews) * 100, 3),
+    }
+
+
+def _unresolved_shadow_count(events: list[dict[str, object]]) -> int:
+    return sum(1 for event in events if str(event.get("action", "")).endswith("_shadow_only"))
+
+
 def _event_policy_fields(event: dict[str, object]) -> dict[str, object]:
     metadata = event.get("metadata", {})
     if not isinstance(metadata, dict):
@@ -1069,6 +1476,85 @@ def _event_policy_fields(event: dict[str, object]) -> dict[str, object]:
         "strict_policy_decision": strict or "unknown",
         "relaxed_only_trade": event.get("relaxed_only_trade", policy.get("relaxed_only_trade", False)),
     }
+
+
+def _event_regime(event: dict[str, object]) -> str:
+    if event.get("regime"):
+        return str(event.get("regime"))
+    metadata = event.get("metadata", {})
+    if not isinstance(metadata, dict):
+        return ""
+    market_regime = metadata.get("market_regime", {})
+    if isinstance(market_regime, dict):
+        return str(market_regime.get("regime", ""))
+    return ""
+
+
+def _event_entry_mode(event: dict[str, object]) -> str:
+    metadata = event.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    policy = metadata.get("regime_policy", metadata.get("regime_policy_audit", {}))
+    if not isinstance(policy, dict):
+        policy = {}
+    return str(event.get("entry_mode", metadata.get("entry_mode", policy.get("entry_mode", ""))) or "")
+
+
+def _pending_event_is_addon(event: dict[str, object]) -> bool:
+    metadata = event.get("metadata", {})
+    return isinstance(metadata, dict) and bool(metadata.get("is_addon", False))
+
+
+def _review_pending_entry(review: dict[str, object]) -> dict[str, object]:
+    metadata = review.get("entry_metadata", {})
+    if not isinstance(metadata, dict):
+        return {}
+    pending = metadata.get("pending_entry", {})
+    return dict(pending) if isinstance(pending, dict) else {}
+
+
+def _pnl_by_entry_modes(
+    reviews: list[dict[str, object]],
+    modes: list[str],
+) -> dict[str, object]:
+    return {
+        mode: _pnl_for_reviews([review for review in reviews if review.get("entry_mode") == mode])
+        for mode in modes
+    }
+
+
+def _count_signal_decision(events: list[dict[str, object]], decision: str) -> int:
+    return sum(1 for event in events if _event_policy_fields(event).get("actual_policy_decision") == decision)
+
+
+def _event_ml_blocks(event: dict[str, object]) -> bool:
+    metadata = event.get("metadata", {})
+    if not isinstance(metadata, dict):
+        return False
+    ml = metadata.get("ml_learning", {})
+    return isinstance(ml, dict) and bool(ml.get("blocks_entry", False))
+
+
+def _event_soft_issues(event: dict[str, object]) -> list[object]:
+    metadata = event.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    policy = metadata.get("regime_policy", metadata.get("regime_policy_audit", {}))
+    if not isinstance(policy, dict):
+        policy = {}
+    issues = event.get("soft_issues", policy.get("soft_issues", []))
+    return issues if isinstance(issues, list) else []
+
+
+def _event_hard_issues(event: dict[str, object]) -> list[object]:
+    metadata = event.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    policy = metadata.get("regime_policy", metadata.get("regime_policy_audit", {}))
+    if not isinstance(policy, dict):
+        policy = {}
+    issues = event.get("hard_issues", policy.get("hard_issues", []))
+    return issues if isinstance(issues, list) else []
 
 
 def _negative_groups(

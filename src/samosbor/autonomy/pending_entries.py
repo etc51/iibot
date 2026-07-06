@@ -19,6 +19,7 @@ def record_pending_pullback_short(
     quantity_lots: int,
     policy_metadata: dict[str, object],
     market_regime: dict[str, object],
+    addon_metadata: dict[str, object] | None = None,
     expires_after_bars: int = 8,
     pullback_atr_fraction: float = 0.25,
     min_pullback_pct: float = 0.002,
@@ -39,11 +40,22 @@ def record_pending_pullback_short(
     min_pullback = max(signal.entry_price * min_pullback_pct, 0.0)
     atr_pullback = (atr_value or 0.0) * max(0.0, pullback_atr_fraction)
     pullback_size = max(min_pullback, atr_pullback, signal.instrument.tick_size)
+    addon = _json_ready_dict(addon_metadata or {})
+    is_addon = bool(addon.get("is_addon", False))
     item = {
         "id": f"{symbol}:{timestamp.isoformat()}:pullback-short",
         "state": PENDING_PULLBACK_SHORT_STATE,
         "symbol": symbol,
         "direction": SignalDirection.SHORT.value,
+        "is_addon": is_addon,
+        "parent_trade_id": addon.get("parent_trade_id", ""),
+        "parent_signal_id": addon.get("parent_signal_id", ""),
+        "parent_entry_mode": addon.get("parent_entry_mode", ""),
+        "parent_decision_type": addon.get("parent_decision_type", ""),
+        "addon_multiplier": addon.get("addon_multiplier", 0.0),
+        "strict_policy_original_decision": addon.get("strict_policy_original_decision", ""),
+        "relaxed_probe_opened": addon.get("relaxed_probe_opened", False),
+        "addon_shadow_only_due_to_no_pyramiding": addon.get("addon_shadow_only_due_to_no_pyramiding", False),
         "created_at": timestamp.isoformat(),
         "last_evaluated_at": timestamp.isoformat(),
         "expires_after_bars": max(1, int(expires_after_bars)),
@@ -64,6 +76,12 @@ def record_pending_pullback_short(
             "market_regime": market_regime,
             "regime_policy": policy_metadata,
             "entry_mode": "wait_pullback_short",
+            "pending_addon": addon,
+            "is_addon": is_addon,
+            "addon_shadow_only_due_to_no_pyramiding": addon.get(
+                "addon_shadow_only_due_to_no_pyramiding",
+                False,
+            ),
         },
         "instrument": _instrument_payload(signal.instrument),
         "trigger": {
@@ -117,6 +135,14 @@ def pending_entry_signal(
     metadata["pending_entry"] = {
         "id": item.get("id", ""),
         "state": item.get("state", ""),
+        "is_addon": item.get("is_addon", False),
+        "parent_entry_mode": item.get("parent_entry_mode", ""),
+        "parent_decision_type": item.get("parent_decision_type", ""),
+        "addon_multiplier": item.get("addon_multiplier", 0.0),
+        "addon_shadow_only_due_to_no_pyramiding": item.get(
+            "addon_shadow_only_due_to_no_pyramiding",
+            False,
+        ),
         "created_at": item.get("created_at", ""),
         "triggered_at": item.get("triggered_at", ""),
         "bars_seen": item.get("bars_seen", 0),
@@ -241,6 +267,14 @@ def _pending_event_metadata(item: dict[str, object]) -> dict[str, object]:
         "pullback_trigger_price": item.get("pullback_trigger_price", 0.0),
         "failed_rebound_price": item.get("failed_rebound_price", 0.0),
         "quantity_lots": item.get("quantity_lots", 0),
+        "is_addon": item.get("is_addon", False),
+        "parent_entry_mode": item.get("parent_entry_mode", ""),
+        "parent_decision_type": item.get("parent_decision_type", ""),
+        "addon_multiplier": item.get("addon_multiplier", 0.0),
+        "addon_shadow_only_due_to_no_pyramiding": item.get(
+            "addon_shadow_only_due_to_no_pyramiding",
+            False,
+        ),
     }
 
 

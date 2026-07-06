@@ -177,8 +177,11 @@ def test_trade_review_reports_policy_decisions_and_shadow_outcomes():
             signal_strength=0.7,
             direction=SignalDirection.SHORT,
             entry_metadata={
+                "market_regime": {"regime": "weak_down_choppy", "confidence": 0.8},
+                "entry_mode": "weak_choppy_direct_probe_short",
                 "regime_policy": {
                     "allow_trade": True,
+                    "entry_mode": "weak_choppy_direct_probe_short",
                     "decision_type": "probe_trade",
                     "actual_policy_decision": "probe_trade",
                     "strict_policy_decision": "wait",
@@ -219,6 +222,16 @@ def test_trade_review_reports_policy_decisions_and_shadow_outcomes():
             "actual_policy_decision": "probe_trade",
             "strict_policy_decision": "wait",
             "relaxed_only_trade": True,
+            "metadata": {
+                "market_regime": {"regime": "weak_down_choppy"},
+                "entry_mode": "weak_choppy_direct_probe_short",
+                "regime_policy": {
+                    "entry_mode": "weak_choppy_direct_probe_short",
+                    "actual_policy_decision": "probe_trade",
+                    "strict_policy_decision": "wait",
+                    "relaxed_only_trade": True,
+                },
+            },
         },
         {
             "timestamp": (opened + timedelta(hours=1)).isoformat(),
@@ -248,10 +261,189 @@ def test_trade_review_reports_policy_decisions_and_shadow_outcomes():
     assert payload["policy_signal_distribution"]["relaxed_only_signals"] == 1
     assert payload["policy_outcomes"]["resolved_shadow_trades"] == 1
     assert payload["policy_outcomes"]["relaxed_only_trades"] == 1
+    assert payload["weak_choppy_direct_probe_review"]["weak_down_choppy_probe_now_count"] == 1
+    assert payload["weak_choppy_direct_probe_review"]["strict_wait_relaxed_probe_count"] == 1
+    assert payload["strict_vs_relaxed"]["strict_wait_but_relaxed_traded_count"] == 1
     assert {row["group"] for row in payload["breakdowns"]["actual_policy_decision"]} == {
         "probe_trade",
         "hard_reject",
     }
+
+
+def test_trade_review_reports_long_learning_section_and_old_trades():
+    opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+    trades = [
+        _trade(
+            symbol="SBER",
+            entry_time=opened,
+            net_pnl=12.0,
+            signal_strength=0.5,
+            direction=SignalDirection.LONG,
+            entry_metadata={
+                "market_regime": {"regime": "clean_uptrend", "confidence": 0.9},
+                "entry_mode": "clean_uptrend_direct_long",
+                "regime_policy": {
+                    "entry_mode": "clean_uptrend_direct_long",
+                    "actual_policy_decision": "normal_trade",
+                    "strict_policy_decision": "allow",
+                    "long_context": {"regime": "clean_uptrend", "long_mode": "normal"},
+                },
+            },
+        ),
+        _trade(
+            symbol="OLD",
+            entry_time=opened + timedelta(hours=1),
+            net_pnl=-5.0,
+            signal_strength=0.4,
+            direction=SignalDirection.LONG,
+            entry_metadata={"trend_strength": 0.004},
+        ),
+    ]
+    events = [
+        {
+            "timestamp": opened.isoformat(),
+            "action": "signal",
+            "symbol": "SBER",
+            "direction": "long",
+            "approved": True,
+            "metadata": {
+                "market_regime": {"regime": "clean_uptrend"},
+                "entry_mode": "clean_uptrend_direct_long",
+                "regime_policy": {"actual_policy_decision": "normal_trade"},
+            },
+        }
+    ]
+
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=7.0),
+        trades,
+        events,
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    review = payload["long_learning_review"]
+    assert review["long_signals_total"] == 1
+    assert review["long_normal_count"] == 1
+    assert review["long_pnl_total"]["trades"] == 2
+    assert review["clean_uptrend_long_pnl"]["net_pnl_rub"] == 12.0
+
+
+def test_trade_review_reports_learning_cap_metrics():
+    opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+    trades = [
+        _trade(
+            symbol="SBER",
+            entry_time=opened,
+            net_pnl=-25.0,
+            signal_strength=0.7,
+            direction=SignalDirection.SHORT,
+            entry_metadata={
+                "learning_caps": {
+                    "mode": "probe",
+                    "decision_type": "probe_trade",
+                    "probe_count_today": 40,
+                    "exploration_count_today": 0,
+                    "same_symbol_count_today": 3,
+                    "same_entry_mode_count_today": 1,
+                    "same_regime_count_today": 1,
+                    "daily_cap_hit": True,
+                    "same_symbol_cap_hit": True,
+                    "same_entry_mode_cap_hit": False,
+                    "same_regime_cap_hit": False,
+                    "cap_behavior_applied": "shadow_only",
+                    "oversampling_tags": [
+                        "probe_daily_cap_soft_warning",
+                        "same_symbol_learning_cap_hit",
+                    ],
+                    "original_quantity_lots": 4,
+                    "adjusted_quantity_lots": 0,
+                    "size_multiplier": 1.0,
+                }
+            },
+        )
+    ]
+    events = [
+        {
+            "timestamp": opened.isoformat(),
+            "action": "learning_cap_reduce_size",
+            "symbol": "GAZP",
+            "metadata": {
+                "learning_caps": {
+                    "mode": "exploration",
+                    "decision_type": "exploration_trade",
+                    "probe_count_today": 0,
+                    "exploration_count_today": 40,
+                    "daily_cap_hit": True,
+                    "same_symbol_cap_hit": False,
+                    "same_entry_mode_cap_hit": False,
+                    "same_regime_cap_hit": True,
+                    "cap_behavior_applied": "reduce_size",
+                    "oversampling_tags": ["same_regime_learning_cap_hit"],
+                }
+            },
+        }
+    ]
+
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=-25.0),
+        trades,
+        events,
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    review_caps = payload["reviews"][0]["learning_caps"]
+    metrics = payload["learning_caps"]
+    assert review_caps["available"] is True
+    assert metrics["available"] is True
+    assert metrics["probe_trades_per_day"] == 40
+    assert metrics["exploration_trades_per_day"] == 40
+    assert metrics["probe_daily_cap_hits"] == 1
+    assert metrics["exploration_daily_cap_hits"] == 1
+    assert metrics["same_symbol_cap_hits"] == 1
+    assert metrics["same_regime_cap_hits"] == 1
+    assert metrics["reduce_size_events"] == 1
+    assert metrics["same_symbol_cap_pnl"]["trades"] == 1
+
+
+def test_trade_review_reports_selloff_learning_cap_metrics():
+    opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+    events = [
+        {
+            "timestamp": opened.isoformat(),
+            "action": "selloff_learning_cap_shadow_only",
+            "symbol": "SBER",
+            "metadata": {
+                "selloff_learning_caps": {
+                    "selloff_positions_count": 9,
+                    "new_selloff_shorts_this_cycle": 8,
+                    "same_symbol_selloff_cap_hit": True,
+                    "same_entry_mode_selloff_cap_hit": False,
+                    "same_regime_selloff_cap_hit": True,
+                }
+            },
+        }
+    ]
+
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=0.0),
+        [],
+        events,
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    metrics = payload["selloff_learning_caps"]
+    assert metrics["available"] is True
+    assert metrics["selloff_positions_used"] == 9
+    assert metrics["selloff_new_shorts_per_cycle_max_observed"] == 8
+    assert metrics["selloff_same_symbol_cap_hits"] == 1
+    assert metrics["selloff_same_regime_cap_hits"] == 1
+    assert metrics["shadow_only_events"] == 1
 
 
 def test_trade_review_exposes_post_close_analysis():

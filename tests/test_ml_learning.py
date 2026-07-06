@@ -126,6 +126,61 @@ def test_signal_learning_blocks_low_quality_entry():
     assert CONFIRMATION_AFTER_IMPULSE_TAG in result["learning_tags"]
 
 
+def test_signal_learning_normalizes_regression_target_per_lot():
+    instrument = Instrument(symbol="PLZL", instrument_type=InstrumentType.STOCK, lot_size=1)
+    feedback = {"pending": [], "resolved": []}
+    start = datetime(2025, 1, 1, 8, 0, tzinfo=timezone.utc)
+    for index in range(40):
+        feedback["resolved"].append(
+            _feedback_item(
+                symbol="SBER",
+                direction="long",
+                created_at=start + timedelta(minutes=15 * index),
+                signal_strength=0.85,
+                quantity_lots=10,
+                net_pnl=30.0,
+            )
+        )
+    for index in range(40):
+        feedback["resolved"].append(
+            _feedback_item(
+                symbol="PLZL",
+                direction="short",
+                created_at=start + timedelta(minutes=15 * (index + 40)),
+                signal_strength=0.25,
+                quantity_lots=10,
+                net_pnl=-80.0,
+            )
+        )
+
+    signal = Signal(
+        instrument=instrument,
+        direction=SignalDirection.SHORT,
+        strength=0.25,
+        entry_price=100.0,
+        stop_price=101.0,
+        take_profit=97.5,
+        reason="test",
+        context_score=-0.2,
+    )
+
+    result = assess_signal_learning(
+        signal,
+        feedback,
+        timestamp=start + timedelta(hours=24),
+        quantity_lots=10,
+        timezone_name="Europe/Moscow",
+        slippage_bps=4.0,
+        commission_bps=4.0,
+        min_samples=40,
+    )
+
+    assert result["available"] is True
+    assert result["target_normalization"] == "net_pnl_per_lot"
+    assert -15.0 < result["expected_pnl_per_lot_rub"] < 0.0
+    assert -150.0 < result["expected_pnl_position_rub"] < 0.0
+
+
 def test_learning_position_size_adjustment_reduces_ml_block_to_quarter_size():
     adjustment = learning_position_size_adjustment(
         {
@@ -195,6 +250,7 @@ def _feedback_item(
     created_at: datetime,
     signal_strength: float,
     net_pnl: float,
+    quantity_lots: int = 1,
 ) -> dict[str, object]:
     return {
         "symbol": symbol,
@@ -205,7 +261,7 @@ def _feedback_item(
         "take_profit": 102.5 if direction == "long" else 97.5,
         "signal_strength": signal_strength,
         "horizon_bars": 48,
-        "quantity_lots": 1,
+        "quantity_lots": quantity_lots,
         "lot_size": 1,
         "instrument_type": "stock",
         "tick_size": 0.01,

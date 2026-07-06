@@ -279,7 +279,7 @@ def assess_signal_learning(
     frame = pd.DataFrame(rows)
     x_train = frame[_FEATURES]
     y_train = frame["win"].astype(int)
-    pnl_train = frame["net_pnl"].astype(float)
+    pnl_train = frame["net_pnl_per_lot"].astype(float)
 
     preprocess = ColumnTransformer(
         [
@@ -362,10 +362,14 @@ def assess_signal_learning(
         "resolved_samples": len(feedback_payload.get("resolved", [])),
         "usable_samples": len(rows),
         "training_win_rate_pct": round(sum(wins) / len(wins) * 100.0, 3),
-        "training_expectancy_per_lot_rub": round(sum(float(row["net_pnl"]) for row in rows) / len(rows), 4),
+        "training_expectancy_per_lot_rub": round(
+            sum(float(row["net_pnl_per_lot"]) for row in rows) / len(rows),
+            4,
+        ),
         "probability_profit": round(probability_profit, 4),
         "expected_pnl_per_lot_rub": round(expected_pnl_per_lot, 4),
         "expected_pnl_position_rub": round(expected_pnl_position, 2),
+        "target_normalization": "net_pnl_per_lot",
         "round_turnover_commission_rub": round(commission_round_rub, 2),
         "required_net_edge_rub": round(required_net_edge_rub, 2),
         "low_quality_probability_threshold": low_quality_probability_threshold,
@@ -447,11 +451,12 @@ def _row_from_feedback_item(
         return None
     if entry_price <= 0 or not math.isfinite(net_pnl):
         return None
+    quantity_lots = _quantity_lots_from_item(item)
 
     metadata = item.get("metadata", {})
     if not isinstance(metadata, dict):
         metadata = {}
-    return _feature_row(
+    row = _feature_row(
         symbol=str(item.get("symbol", "")),
         direction=str(item.get("direction", "")),
         timestamp=created_at,
@@ -466,6 +471,9 @@ def _row_from_feedback_item(
         commission_bps=float(item.get("commission_bps", 0.0) or 0.0),
         net_pnl=net_pnl,
     )
+    row["quantity_lots"] = quantity_lots
+    row["net_pnl_per_lot"] = net_pnl / quantity_lots
+    return row
 
 
 def _row_from_signal(
@@ -493,6 +501,7 @@ def _row_from_signal(
         net_pnl=0.0,
     )
     row["quantity_lots"] = max(1, int(quantity_lots))
+    row["net_pnl_per_lot"] = 0.0
     return row
 
 
@@ -564,6 +573,14 @@ def _round_turnover_commission_rub(
 ) -> float:
     notional = abs(signal.entry_price * max(1, int(signal.instrument.lot_size)) * max(1, quantity_lots))
     return 2.0 * notional * max(0.0, float(commission_bps)) / 10_000
+
+
+def _quantity_lots_from_item(item: dict[str, object]) -> int:
+    try:
+        quantity = int(float(item.get("quantity_lots", 1)))
+    except (TypeError, ValueError):
+        quantity = 1
+    return max(1, quantity)
 
 
 def _is_late_reentry(

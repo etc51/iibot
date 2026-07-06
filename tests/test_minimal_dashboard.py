@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from samosbor.minimal_dashboard import (
+    _dashboard_trades,
+    _display_exit_reason,
     _gross_exposure,
     _portfolio_equity,
     _positions_from_state,
     _request_path,
+    _trades_table,
 )
 
 
@@ -53,11 +56,62 @@ def test_open_position_falls_back_to_state_price():
     assert positions[0]["price_source"] == "state"
 
 
+def test_zero_lot_position_is_hidden_from_open_positions():
+    portfolio = _portfolio()
+    portfolio["positions"]["ROSN"] = {
+        "instrument": {
+            "symbol": "ROSN",
+            "instrument_type": "stock",
+            "lot_size": 10,
+        },
+        "direction": "short",
+        "quantity_lots": 0,
+        "entry_price": 301.6293,
+        "current_price": 300.9,
+        "stop_price": 305.6446,
+        "take_profit": 292.0134,
+    }
+
+    positions = _positions_from_state(portfolio, live_prices={"TRNFP": 1290.0, "ROSN": 300.9})
+
+    assert [position["symbol"] for position in positions] == ["TRNFP"]
+
+
 def test_dashboard_equity_and_exposure_use_units_and_short_sign():
     positions = _positions_from_state(_portfolio(), live_prices={"TRNFP": 1290.0})
 
     assert _gross_exposure(positions) == 45_150.0
     assert _portfolio_equity(_portfolio(), positions) == 302_209.77
+
+
+def test_recent_trades_display_positive_stop_loss_as_profit_protection():
+    trade = {
+        "symbol": "X5",
+        "direction": "short",
+        "net_pnl": 46.51,
+        "reason": "stop-loss",
+        "exit_time": "2026-07-06T14:00:00+00:00",
+    }
+
+    assert _display_exit_reason(trade) == "profit-protect-stop"
+    html = _trades_table([trade])
+    assert "profit-protect-stop" in html
+    assert "<td>stop-loss</td>" not in html
+
+
+def test_api_recent_trades_normalizes_positive_stop_loss_reason():
+    trade = {
+        "symbol": "TRNFP",
+        "direction": "short",
+        "net_pnl": 1.69,
+        "reason": "stop-loss",
+        "exit_time": "2026-07-06T14:00:00+00:00",
+    }
+
+    rows = _dashboard_trades([trade])
+
+    assert rows[0]["reason"] == "profit-protect-stop"
+    assert rows[0]["raw_reason"] == "stop-loss"
 
 
 def test_request_path_ignores_refresh_query_string():

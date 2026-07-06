@@ -165,6 +165,19 @@ class _MlBlockedCycleOrchestrator(_EntrySignalCycleOrchestrator):
         return replace(signal, metadata=metadata)
 
 
+class _ZeroRuntimeSizeCycleOrchestrator(_EntrySignalCycleOrchestrator):
+    def _signal_with_runtime_policy(self, signal, quantity_lots, *, market_regime, symbol_health, entry_mode):
+        metadata = dict(signal.metadata)
+        metadata["adaptive_risk_sizing"] = {
+            "original_quantity_lots": int(quantity_lots),
+            "adjusted_quantity_lots": 0,
+            "risk_multiplier": 0.0,
+            "entry_mode": entry_mode,
+            "symbol_health": symbol_health,
+        }
+        return replace(signal, metadata=metadata), 0, None
+
+
 class _ShortExhaustionSignalStrategy(_EntrySignalStrategy):
     def generate_signal(self, instrument, candles):
         last = candles[-1]
@@ -354,6 +367,61 @@ class PaperCycleSessionFlatTest(unittest.TestCase):
 
 
 class PaperCycleTrailingProtectionTest(unittest.TestCase):
+    def test_paper_cycle_records_profitable_trailing_stop_as_profit_protection(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            config = load_config(config_path)
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            state_path = config.resolve_path(config.execution.state_path)
+            broker = LocalPaperBroker.fresh(100_000, slippage_bps=0, commission_bps=0)
+            broker.open_position(
+                Signal(
+                    instrument=instrument,
+                    direction=SignalDirection.SHORT,
+                    strength=0.8,
+                    entry_price=100.0,
+                    stop_price=105.0,
+                    take_profit=90.0,
+                    reason="bootstrap-position",
+                ),
+                10,
+                datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc),
+            )
+            broker.update_position_protection(
+                "SBER",
+                timestamp=datetime(2025, 1, 1, 10, 30, tzinfo=timezone.utc),
+                stop_price=98.0,
+                reason="trailing-profit-protection",
+            )
+            broker.save(state_path)
+
+            latest_candle = Candle(
+                timestamp=datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc),
+                open=97.0,
+                high=98.5,
+                low=96.5,
+                close=97.4,
+                volume=5_000_000,
+            )
+            orchestrator = _NoSignalPaperCycleOrchestrator(
+                config,
+                _FakeProvider([instrument], {"SBER": [latest_candle]}),
+            )
+
+            orchestrator.run_paper_cycle()
+            reloaded = LocalPaperBroker.load(
+                state_path,
+                initial_cash=config.backtest.initial_cash,
+                slippage_bps=config.execution.slippage_bps,
+                commission_bps=config.execution.commission_bps,
+            )
+
+            self.assertEqual(len(reloaded.portfolio.positions), 0)
+            self.assertEqual(len(reloaded.trades), 1)
+            self.assertEqual(reloaded.trades[0].reason, ExitReason.PROFIT_PROTECT_STOP.value)
+            self.assertGreater(reloaded.trades[0].net_pnl, 0.0)
+
     def test_paper_cycle_persists_trailing_stop_after_profit_threshold(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -557,62 +625,392 @@ class PaperCycleTrailingProtectionTest(unittest.TestCase):
 
 
 class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
-    def test_learning_mode_daily_trade_cap_uses_configured_limit(self):
+    def _load_config_with_extra_lines(self, root: Path, lines: list[str]):
+        config_path = _write_basic_paper_config(root)
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8") + "\n".join(lines) + "\n",
+            encoding="utf-8",
+        )
+        return load_config(config_path)
+
+    def _broker_for_config(self, config):
+        return LocalPaperBroker.fresh(
+            config.backtest.initial_cash,
+            slippage_bps=config.execution.slippage_bps,
+            commission_bps=config.execution.commission_bps,
+        )
+
+    def _policy_signal(
+        self,
+        decision_type: str,
+        *,
+        symbol: str = "SBER",
+        entry_mode: str = "trend_short",
+        market_regime: str = "weak_down",
+    ) -> Signal:
+        return Signal(
+            instrument=Instrument(symbol=symbol, instrument_type=InstrumentType.STOCK, lot_size=1),
+            direction=SignalDirection.SHORT,
+            strength=0.6,
+            entry_price=100.0,
+            stop_price=101.0,
+            take_profit=98.0,
+            reason="probe",
+            metadata={
+                "entry_mode": entry_mode,
+                "market_regime": {"regime": market_regime},
+                "regime_policy": {
+                    "decision_type": decision_type,
+                    "entry_mode": entry_mode,
+                },
+            },
+        )
+
+    def _approved_policy_event(
+        self,
+        timestamp: datetime,
+        decision_type: str,
+        *,
+        symbol: str = "SBER",
+        entry_mode: str = "trend_short",
+        market_regime: str = "weak_down",
+    ) -> dict[str, object]:
+        return {
+            "timestamp": timestamp.isoformat(),
+            "action": "signal",
+            "symbol": symbol,
+            "approved": True,
+            "actual_policy_decision": decision_type,
+            "metadata": {
+                "entry_mode": entry_mode,
+                "market_regime": {"regime": market_regime},
+                "regime_policy": {
+                    "decision_type": decision_type,
+                    "entry_mode": entry_mode,
+                },
+            },
+        }
+
+    def test_probe_allows_up_to_40_trades_per_day_by_default(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            config_path = _write_basic_paper_config(root)
-            config_path.write_text(
-                config_path.read_text(encoding="utf-8")
-                + "\n".join(
-                    [
-                        "[learning_mode]",
-                        "enabled = true",
-                        'profile = "relaxed_paper_learning"',
-                        "",
-                        "[learning_risk.probe]",
-                        "risk_multiplier = 0.3",
-                        "max_positions = 5",
-                        "max_trades_per_day = 1",
-                        "",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
+            config = self._load_config_with_extra_lines(
+                root,
+                [
+                    "[learning_mode]",
+                    "enabled = true",
+                    'profile = "relaxed_paper_learning"',
+                    "",
+                ],
             )
-            config = load_config(config_path)
-            broker = LocalPaperBroker.fresh(
-                config.backtest.initial_cash,
-                slippage_bps=config.execution.slippage_bps,
-                commission_bps=config.execution.commission_bps,
-            )
+            broker = self._broker_for_config(config)
             timestamp = datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc)
-            broker.events.append(
-                {
-                    "timestamp": timestamp.isoformat(),
-                    "action": "signal",
-                    "approved": True,
-                    "actual_policy_decision": PolicyDecisionType.PROBE_TRADE.value,
-                }
+            for index in range(39):
+                broker.events.append(
+                    self._approved_policy_event(
+                        timestamp,
+                        PolicyDecisionType.PROBE_TRADE.value,
+                        symbol=f"SYM{index}",
+                        entry_mode=f"mode-{index}",
+                        market_regime=f"regime-{index}",
+                    )
+                )
+
+            reason = TradingOrchestrator(config)._learning_mode_limit_reason(
+                broker,
+                self._policy_signal(
+                    PolicyDecisionType.PROBE_TRADE.value,
+                    entry_mode="fresh-mode",
+                    market_regime="fresh-regime",
+                ),
+                timestamp=timestamp,
             )
-            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
-            signal = Signal(
-                instrument=instrument,
-                direction=SignalDirection.SHORT,
-                strength=0.6,
-                entry_price=100.0,
-                stop_price=101.0,
-                take_profit=98.0,
-                reason="probe",
-                metadata={"regime_policy": {"decision_type": PolicyDecisionType.PROBE_TRADE.value}},
+
+            self.assertIsNone(reason)
+
+    def test_exploration_allows_up_to_40_trades_per_day_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = self._load_config_with_extra_lines(
+                root,
+                [
+                    "[learning_mode]",
+                    "enabled = true",
+                    'profile = "relaxed_paper_learning"',
+                    "",
+                ],
+            )
+            broker = self._broker_for_config(config)
+            timestamp = datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc)
+            for index in range(39):
+                broker.events.append(
+                    self._approved_policy_event(
+                        timestamp,
+                        PolicyDecisionType.EXPLORATION_TRADE.value,
+                        symbol=f"SYM{index}",
+                        entry_mode=f"mode-{index}",
+                        market_regime=f"regime-{index}",
+                    )
+                )
+
+            reason = TradingOrchestrator(config)._learning_mode_limit_reason(
+                broker,
+                self._policy_signal(
+                    PolicyDecisionType.EXPLORATION_TRADE.value,
+                    entry_mode="fresh-mode",
+                    market_regime="fresh-regime",
+                ),
+                timestamp=timestamp,
+            )
+
+            self.assertIsNone(reason)
+
+    def test_probe_uses_global_position_slots(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = self._load_config_with_extra_lines(
+                root,
+                [
+                    "[learning_mode]",
+                    "enabled = true",
+                    'profile = "relaxed_paper_learning"',
+                    "",
+                    "[learning_risk.probe]",
+                    "max_positions = 1",
+                    "",
+                ],
+            )
+            broker = self._broker_for_config(config)
+            timestamp = datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc)
+            broker.open_position(
+                self._policy_signal(PolicyDecisionType.PROBE_TRADE.value, symbol="GAZP"),
+                1,
+                timestamp,
             )
 
             reason = TradingOrchestrator(config)._learning_mode_limit_reason(
                 broker,
-                signal,
+                self._policy_signal(PolicyDecisionType.PROBE_TRADE.value),
+                timestamp=timestamp,
+            )
+
+            self.assertIsNone(reason)
+
+    def test_exploration_uses_global_position_slots(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = self._load_config_with_extra_lines(
+                root,
+                [
+                    "[learning_mode]",
+                    "enabled = true",
+                    'profile = "relaxed_paper_learning"',
+                    "",
+                    "[learning_risk.exploration]",
+                    "max_positions = 1",
+                    "",
+                ],
+            )
+            broker = self._broker_for_config(config)
+            timestamp = datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc)
+            broker.open_position(
+                self._policy_signal(PolicyDecisionType.EXPLORATION_TRADE.value, symbol="GAZP"),
+                1,
+                timestamp,
+            )
+
+            reason = TradingOrchestrator(config)._learning_mode_limit_reason(
+                broker,
+                self._policy_signal(PolicyDecisionType.EXPLORATION_TRADE.value),
+                timestamp=timestamp,
+            )
+
+            self.assertIsNone(reason)
+
+    def test_daily_cap_warn_only_does_not_hard_reject(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = self._load_config_with_extra_lines(
+                root,
+                [
+                    "[learning_mode]",
+                    "enabled = true",
+                    'profile = "relaxed_paper_learning"',
+                    "",
+                    "[learning_risk.probe]",
+                    "max_trades_per_day = 1",
+                    "",
+                ],
+            )
+            broker = self._broker_for_config(config)
+            timestamp = datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc)
+            broker.events.append(
+                self._approved_policy_event(timestamp, PolicyDecisionType.PROBE_TRADE.value)
+            )
+
+            signal, quantity_lots, reason, cap_events = TradingOrchestrator(config)._apply_learning_caps(
+                broker,
+                self._policy_signal(PolicyDecisionType.PROBE_TRADE.value),
+                quantity_lots=4,
+                timestamp=timestamp,
+            )
+
+            self.assertIsNone(reason)
+            self.assertEqual(quantity_lots, 4)
+            self.assertEqual(cap_events[0]["action"], "learning_cap_warning")
+            self.assertTrue(signal.metadata["learning_caps"]["daily_cap_hit"])
+
+    def test_daily_cap_can_shadow_only_when_configured(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = self._load_config_with_extra_lines(
+                root,
+                [
+                    "[learning_mode]",
+                    "enabled = true",
+                    'profile = "relaxed_paper_learning"',
+                    "",
+                    "[learning_risk.probe]",
+                    "risk_multiplier = 0.3",
+                    "max_positions = 5",
+                    "max_trades_per_day = 1",
+                    "",
+                    "[learning_caps]",
+                    'daily_cap_behavior = "shadow_only"',
+                    "",
+                ],
+            )
+            broker = self._broker_for_config(config)
+            timestamp = datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc)
+            broker.events.append(
+                self._approved_policy_event(timestamp, PolicyDecisionType.PROBE_TRADE.value)
+            )
+
+            reason = TradingOrchestrator(config)._learning_mode_limit_reason(
+                broker,
+                self._policy_signal(PolicyDecisionType.PROBE_TRADE.value),
                 timestamp=timestamp,
             )
 
             self.assertEqual(reason, "entry blocked by probe learning daily trade cap")
+
+    def test_same_symbol_probe_cap_creates_shadow_only(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = self._load_config_with_extra_lines(
+                root,
+                [
+                    "[learning_mode]",
+                    "enabled = true",
+                    'profile = "relaxed_paper_learning"',
+                    "",
+                    "[learning_risk.probe]",
+                    "max_same_symbol_trades_per_day = 1",
+                    "",
+                ],
+            )
+            broker = self._broker_for_config(config)
+            timestamp = datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc)
+            broker.events.append(
+                self._approved_policy_event(
+                    timestamp,
+                    PolicyDecisionType.PROBE_TRADE.value,
+                    symbol="SBER",
+                    entry_mode="other-mode",
+                    market_regime="other-regime",
+                )
+            )
+
+            signal, quantity_lots, reason, cap_events = TradingOrchestrator(config)._apply_learning_caps(
+                broker,
+                self._policy_signal(PolicyDecisionType.PROBE_TRADE.value),
+                quantity_lots=4,
+                timestamp=timestamp,
+            )
+
+            self.assertEqual(reason, "same_symbol_learning_cap_hit")
+            self.assertEqual(quantity_lots, 0)
+            self.assertEqual(cap_events[0]["action"], "learning_cap_shadow_only")
+            self.assertTrue(signal.metadata["learning_caps"]["same_symbol_cap_hit"])
+
+    def test_same_entry_mode_probe_cap_creates_shadow_only(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = self._load_config_with_extra_lines(
+                root,
+                [
+                    "[learning_mode]",
+                    "enabled = true",
+                    'profile = "relaxed_paper_learning"',
+                    "",
+                    "[learning_risk.probe]",
+                    "max_same_entry_mode_trades_per_day = 1",
+                    "",
+                ],
+            )
+            broker = self._broker_for_config(config)
+            timestamp = datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc)
+            broker.events.append(
+                self._approved_policy_event(
+                    timestamp,
+                    PolicyDecisionType.PROBE_TRADE.value,
+                    symbol="GAZP",
+                    entry_mode="trend_short",
+                    market_regime="other-regime",
+                )
+            )
+
+            signal, quantity_lots, reason, cap_events = TradingOrchestrator(config)._apply_learning_caps(
+                broker,
+                self._policy_signal(PolicyDecisionType.PROBE_TRADE.value),
+                quantity_lots=4,
+                timestamp=timestamp,
+            )
+
+            self.assertEqual(reason, "same_entry_mode_learning_cap_hit")
+            self.assertEqual(quantity_lots, 0)
+            self.assertEqual(cap_events[0]["action"], "learning_cap_shadow_only")
+            self.assertTrue(signal.metadata["learning_caps"]["same_entry_mode_cap_hit"])
+
+    def test_same_regime_cap_reduces_size_not_hard_reject(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = self._load_config_with_extra_lines(
+                root,
+                [
+                    "[learning_mode]",
+                    "enabled = true",
+                    'profile = "relaxed_paper_learning"',
+                    "",
+                    "[learning_risk.probe]",
+                    "max_same_regime_trades_per_day = 1",
+                    "",
+                ],
+            )
+            broker = self._broker_for_config(config)
+            timestamp = datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc)
+            broker.events.append(
+                self._approved_policy_event(
+                    timestamp,
+                    PolicyDecisionType.PROBE_TRADE.value,
+                    symbol="GAZP",
+                    entry_mode="other-mode",
+                    market_regime="weak_down",
+                )
+            )
+
+            signal, quantity_lots, reason, cap_events = TradingOrchestrator(config)._apply_learning_caps(
+                broker,
+                self._policy_signal(PolicyDecisionType.PROBE_TRADE.value),
+                quantity_lots=5,
+                timestamp=timestamp,
+            )
+
+            self.assertIsNone(reason)
+            self.assertEqual(quantity_lots, 2)
+            self.assertEqual(cap_events[0]["action"], "learning_cap_reduce_size")
+            self.assertTrue(signal.metadata["learning_caps"]["same_regime_cap_hit"])
+            self.assertEqual(signal.metadata["learning_caps"]["size_multiplier"], 0.5)
 
     def test_paper_cycle_summary_includes_signal_rejection_breakdown(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -859,10 +1257,62 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
                 signal_event["quantity_lots"],
             )
 
-    def test_paper_cycle_defers_weak_down_choppy_short_to_pending_pullback(self):
+    def test_paper_cycle_rejects_runtime_policy_zero_lot_entry(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             config_path = _write_basic_paper_config(root)
+            config = load_config(config_path)
+            instrument = Instrument(symbol="PLZL", instrument_type=InstrumentType.STOCK, lot_size=1)
+            latest_candle = Candle(
+                timestamp=datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc),
+                open=1857.0,
+                high=1860.0,
+                low=1850.0,
+                close=1854.0,
+                volume=5_000_000,
+            )
+            orchestrator = _ZeroRuntimeSizeCycleOrchestrator(
+                config,
+                _FakeProvider([instrument], {"PLZL": [latest_candle]}),
+            )
+
+            result = orchestrator.run_paper_cycle()
+            summary = json.loads((Path(result["output_dir"]) / "cycle_summary.json").read_text(encoding="utf-8"))
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+            signal_event = next(event for event in cycle_events if event["action"] == "signal")
+            state = LocalPaperBroker.load(
+                config.resolve_path(config.execution.state_path),
+                initial_cash=config.backtest.initial_cash,
+                slippage_bps=config.execution.slippage_bps,
+                commission_bps=config.execution.commission_bps,
+            )
+
+            self.assertEqual(summary["signals_total"], 1)
+            self.assertEqual(summary["signals_approved"], 0)
+            self.assertEqual(summary["signals_rejected"], 1)
+            self.assertFalse(signal_event["approved"])
+            self.assertEqual(signal_event["quantity_lots"], 0)
+            self.assertEqual(signal_event["reason"], "entry blocked by adaptive risk size < 1 lot")
+            self.assertEqual(state.portfolio.positions, {})
+
+    def test_paper_cycle_opens_weak_choppy_probe_and_creates_pending_addon(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8")
+                + "\n".join(
+                    [
+                        "[learning_mode]",
+                        "enabled = true",
+                        'profile = "relaxed_paper_learning"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
             config = load_config(config_path)
             instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
             latest_candle = Candle(
@@ -899,13 +1349,24 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
             )
 
             self.assertEqual(summary["signals_total"], 1)
-            self.assertEqual(summary["signals_approved"], 0)
-            self.assertFalse(signal_event["approved"])
-            self.assertEqual(signal_event["metadata"]["regime_policy"]["entry_mode"], "wait")
-            self.assertEqual(signal_event["reason"], "entry deferred for pullback short")
+            self.assertEqual(summary["signals_approved"], 1)
+            self.assertTrue(signal_event["approved"])
+            self.assertEqual(
+                signal_event["metadata"]["regime_policy"]["entry_mode"],
+                "weak_choppy_direct_probe_short",
+            )
+            self.assertEqual(
+                signal_event["metadata"]["regime_policy"]["strict_policy_decision"],
+                "wait",
+            )
+            self.assertTrue(signal_event["metadata"]["regime_policy"]["pending_addon_created"])
             self.assertEqual(pending_event["status"], "created")
+            self.assertTrue(pending_event["metadata"]["is_addon"])
+            self.assertTrue(pending_event["metadata"]["addon_shadow_only_due_to_no_pyramiding"])
             self.assertEqual(feedback["pending_entries"][0]["state"], "WAIT_PULLBACK_SHORT")
-            self.assertEqual(len(state.portfolio.positions), 0)
+            self.assertTrue(feedback["pending_entries"][0]["is_addon"])
+            self.assertEqual(len(state.portfolio.positions), 1)
+            self.assertEqual(state.portfolio.positions["SBER"].direction, SignalDirection.SHORT)
 
     def test_paper_cycle_opens_pending_pullback_short_after_failed_rebound(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

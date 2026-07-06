@@ -43,9 +43,11 @@ class TradePolicy:
     side_policy: dict[str, object] = field(default_factory=dict)
     symbol_health_metadata: dict[str, object] = field(default_factory=dict)
     confirmation_5m: dict[str, object] = field(default_factory=dict)
+    policy_flags: dict[str, object] = field(default_factory=dict)
+    long_context: dict[str, object] = field(default_factory=dict)
 
     def as_metadata(self) -> dict[str, object]:
-        return {
+        metadata = {
             "allow_trade": self.allow_trade,
             "entry_mode": self.entry_mode,
             "risk_multiplier": self.risk_multiplier,
@@ -72,7 +74,13 @@ class TradePolicy:
             "side_policy": dict(self.side_policy),
             "symbol_health_policy": dict(self.symbol_health_metadata),
             "confirmation_5m": dict(self.confirmation_5m),
+            "policy_flags": dict(self.policy_flags),
+            "long_context": dict(self.long_context),
         }
+        metadata.update(dict(self.policy_flags))
+        if self.long_context:
+            metadata["long_context"] = dict(self.long_context)
+        return metadata
 
 
 @dataclass(frozen=True)
@@ -334,6 +342,12 @@ def _resolve_relaxed(
     multipliers: list[tuple[str, float]] = [("base", components["base"])]
     entry_mode_out = requested_mode
     force_wait_pullback = False
+    force_shadow_only = False
+    decision_type_override: str | None = None
+    final_multiplier_override: float | None = None
+    policy_flags: dict[str, object] = {}
+    long_context: dict[str, object] = {}
+    ml_negative_edge = _ml_blocks(ml_feedback)
 
     if book is not None and not book.get("available", True) and require_order_book:
         hard_issues.append("missing-order-book")
@@ -404,32 +418,63 @@ def _resolve_relaxed(
         multipliers.append(("side", side_multiplier))
     tags.extend(side_policy["tags"])
 
-    if regime == "weak_down_choppy":
+    if normalized_side == SignalDirection.LONG.value:
+        long_decision = _long_regime_decision(
+            regime=regime,
+            signal_strength=signal_strength,
+            confirmation=confirmation,
+            confirmation_result=confirmation_result,
+            side_policy=side_policy,
+            config=config,
+            strict_policy=strict_policy,
+        )
+        if long_decision["hard_issue"]:
+            hard_issues.append(str(long_decision["hard_issue"]))
+        if long_decision["soft_issue"]:
+            soft_issues.append(str(long_decision["soft_issue"]))
+        tags.extend([str(tag) for tag in long_decision["tags"]])
+        entry_mode_out = str(long_decision["entry_mode"])
+        long_context = dict(long_decision["long_context"])
+        policy_flags.update(dict(long_decision["policy_flags"]))
+        if bool(long_decision["force_wait_pullback"]):
+            force_wait_pullback = True
+        if bool(long_decision["force_shadow_only"]):
+            force_shadow_only = True
+        if long_decision["decision_type"]:
+            decision_type_override = str(long_decision["decision_type"])
+        if long_decision["final_multiplier"] is not None:
+            final_multiplier_override = float(long_decision["final_multiplier"])
+            components["long_regime_policy"] = final_multiplier_override
+    elif regime == "weak_down_choppy":
         if normalized_side == SignalDirection.SHORT.value and requested_mode == "pullback_short":
             multipliers.append(("regime", 0.5))
             soft_issues.append("weak-down-choppy-pullback-short")
             tags.append("wait-pullback-trigger")
             entry_mode_out = "pullback_short"
         elif normalized_side == SignalDirection.SHORT.value:
-            signal_ok = (signal_strength or 0.0) >= _learning_mode_value(
-                config,
-                "choppy_trend_short_probe_min_signal_strength",
-                0.45,
+            short_decision = _weak_down_choppy_short_decision(
+                signal_strength=signal_strength,
+                confirmation_result=confirmation_result,
+                micro_bucket=str(micro["bucket"]),
+                current_soft_issues=len(soft_issues),
+                symbol_health=symbol_health,
+                ml_negative_edge=ml_negative_edge,
+                config=config,
+                strict_policy=strict_policy,
             )
-            book_ok = micro["bucket"] in {"normal", "probe", "unknown"}
-            if _learning_mode_value(config, "allow_choppy_trend_short_probe", True) and signal_ok and book_ok:
-                multipliers.append(("regime", 0.35))
-                soft_issues.append("weak-down-choppy-trend-short-probe")
-                tags.append("choppy-trend-short-probe")
-            else:
+            soft_issues.extend([str(issue) for issue in short_decision["soft_issues"]])
+            tags.extend([str(tag) for tag in short_decision["tags"]])
+            entry_mode_out = str(short_decision["entry_mode"])
+            policy_flags.update(dict(short_decision["policy_flags"]))
+            if bool(short_decision["force_wait_pullback"]):
                 force_wait_pullback = True
-                entry_mode_out = "wait"
-                soft_issues.append("weak-down-choppy-wait-pullback")
-                tags.append("wait-pullback")
-        else:
-            multipliers.append(("regime", 0.25))
-            soft_issues.append("weak-down-choppy-long")
-            tags.append("choppy-long")
+            if short_decision["decision_type"]:
+                decision_type_override = str(short_decision["decision_type"])
+            if short_decision["final_multiplier"] is not None:
+                final_multiplier_override = float(short_decision["final_multiplier"])
+                components["weak_choppy_direct"] = final_multiplier_override
+            else:
+                multipliers.append(("regime", 0.35))
     elif regime == "range_chop":
         if _learning_mode_value(config, "allow_range_chop_exploration", True):
             multipliers.append(("regime", 0.10))
@@ -440,7 +485,6 @@ def _resolve_relaxed(
             soft_issues.append("range-chop-no-trend-follow")
             tags.append("range-chop")
 
-    ml_negative_edge = _ml_blocks(ml_feedback)
     ml_multiplier = 1.0
     if ml_negative_edge and hard_issues:
         hard_issues.append("ml-negative-edge-plus-hard-execution-issue")
@@ -470,6 +514,8 @@ def _resolve_relaxed(
 
     effective_multiplier = _clamped_product([value for _, value in multipliers])
     components.update({name: value for name, value in multipliers if name != "base"})
+    if final_multiplier_override is not None and not hard_issues and not force_wait_pullback:
+        effective_multiplier = max(0.0, min(1.0, float(final_multiplier_override)))
 
     if hard_issues:
         decision_type = PolicyDecisionType.HARD_REJECT.value
@@ -481,8 +527,12 @@ def _resolve_relaxed(
         allow_trade = False
         effective_multiplier = 0.0
         entry_mode_out = "wait"
+    elif force_shadow_only:
+        decision_type = PolicyDecisionType.SHADOW_ONLY.value
+        allow_trade = False
+        effective_multiplier = 0.0
     else:
-        decision_type = _decision_from_issues(soft_issues, tags)
+        decision_type = decision_type_override or _decision_from_issues(soft_issues, tags)
         allow_trade = True
         if decision_type == PolicyDecisionType.PROBE_TRADE.value and not _learning_mode_value(
             config,
@@ -507,9 +557,9 @@ def _resolve_relaxed(
             decision_type = PolicyDecisionType.SHADOW_ONLY.value
             allow_trade = False
 
-    if decision_type == PolicyDecisionType.PROBE_TRADE.value:
+    if final_multiplier_override is None and decision_type == PolicyDecisionType.PROBE_TRADE.value:
         effective_multiplier *= _mode_risk_multiplier(config, "probe", 0.25)
-    elif decision_type == PolicyDecisionType.EXPLORATION_TRADE.value:
+    elif final_multiplier_override is None and decision_type == PolicyDecisionType.EXPLORATION_TRADE.value:
         effective_multiplier *= _mode_risk_multiplier(config, "exploration", 0.10)
     effective_multiplier = max(0.0, min(1.0, effective_multiplier if allow_trade else 0.0))
     if allow_trade and effective_multiplier < _learning_mode_value(
@@ -522,15 +572,24 @@ def _resolve_relaxed(
         effective_multiplier = 0.0
     components["decision_mode"] = (
         _mode_risk_multiplier(config, "probe", 0.25)
-        if decision_type == PolicyDecisionType.PROBE_TRADE.value
+        if final_multiplier_override is None and decision_type == PolicyDecisionType.PROBE_TRADE.value
         else _mode_risk_multiplier(config, "exploration", 0.10)
-        if decision_type == PolicyDecisionType.EXPLORATION_TRADE.value
+        if final_multiplier_override is None and decision_type == PolicyDecisionType.EXPLORATION_TRADE.value
         else 1.0
     )
 
     reasons = _dedupe([*soft_issues, *hard_issues]) or ["relaxed-default-allow"]
     strict_decision = strict_policy.strict_policy_decision
     relaxed_only = allow_trade and not strict_policy.allow_trade
+    if allow_trade and strict_decision == "wait":
+        policy_flags.setdefault("would_have_waited_pullback_strict", True)
+        if decision_type in {
+            PolicyDecisionType.PROBE_TRADE.value,
+            PolicyDecisionType.EXPLORATION_TRADE.value,
+        }:
+            policy_flags.setdefault("strict_wait_overridden_by_relaxed_probe", True)
+    if policy_flags.get("probe_now_with_pending_addon"):
+        policy_flags.setdefault("pending_addon_created", False)
     confirmation_metadata = {
         "status": confirmation_result["status"],
         "mode": confirmation_result["mode"],
@@ -574,6 +633,8 @@ def _resolve_relaxed(
         strict_policy_metadata=strict_policy.as_metadata(),
         side_policy={
             "side": normalized_side,
+            "regime": regime,
+            "long_mode": long_context.get("long_mode", "") if long_context else "",
             "normal_enabled": side_policy["normal_enabled"],
             "probe_enabled": side_policy["probe_enabled"],
             "exploration_enabled": side_policy["exploration_enabled"],
@@ -582,6 +643,372 @@ def _resolve_relaxed(
         },
         symbol_health_metadata=symbol_metadata,
         confirmation_5m=confirmation_metadata,
+        policy_flags=policy_flags,
+        long_context=long_context,
+    )
+
+
+def _weak_down_choppy_short_decision(
+    *,
+    signal_strength: float | None,
+    confirmation_result: dict[str, object],
+    micro_bucket: str,
+    current_soft_issues: int,
+    symbol_health: str,
+    ml_negative_edge: bool,
+    config: object | None,
+    strict_policy: TradePolicy,
+) -> dict[str, object]:
+    cfg = getattr(getattr(config, "regime_policy", None), "weak_down_choppy", None)
+    signal_value = float(signal_strength or 0.0)
+    confirmation_mode = _weak_choppy_short_confirmation_mode(config, str(confirmation_result.get("status", "")))
+    addon_multiplier = _weak_choppy_value(config, "pullback_addon_multiplier", 0.15)
+    base_flags = {
+        "would_have_waited_pullback_strict": strict_policy.strict_policy_decision == "wait",
+        "strict_policy_keeps_wait_pullback": bool(
+            getattr(cfg, "strict_policy_keeps_wait_pullback", True)
+        ),
+    }
+
+    if confirmation_mode == "wait_pullback_only" or bool(confirmation_result.get("wait_pullback")):
+        return {
+            "decision_type": "",
+            "entry_mode": "wait",
+            "final_multiplier": None,
+            "force_wait_pullback": True,
+            "soft_issues": ["weak-down-choppy-wait-pullback"],
+            "tags": ["wait-pullback", "weak-choppy-wait-only"],
+            "policy_flags": {**base_flags, "weak_choppy_wait_only_selected": True},
+        }
+    if confirmation_mode == "shadow_or_reject":
+        return {
+            "decision_type": PolicyDecisionType.SHADOW_ONLY.value,
+            "entry_mode": "weak_choppy_adverse_confirmation_shadow_short",
+            "final_multiplier": 0.0,
+            "force_wait_pullback": False,
+            "soft_issues": ["weak-down-choppy-extreme-adverse-confirmation"],
+            "tags": ["weak-choppy-shadow-only"],
+            "policy_flags": {**base_flags, "weak_choppy_wait_only_selected": False},
+        }
+
+    probe_enabled = bool(_weak_choppy_value(config, "short_direct_probe_enabled", True))
+    exploration_enabled = bool(_weak_choppy_value(config, "short_direct_exploration_enabled", True))
+    enable_addon = bool(_weak_choppy_value(config, "enable_probe_now_with_pending_addon", True))
+    create_addon = bool(_weak_choppy_value(config, "create_pullback_addon_after_direct_probe", True))
+    probe_min = _weak_choppy_value(config, "short_direct_probe_min_signal_strength", 0.20)
+    exploration_min = _weak_choppy_value(config, "short_direct_exploration_min_signal_strength", 0.12)
+    max_soft = int(_weak_choppy_value(config, "short_direct_probe_max_soft_issues", 4))
+    book_ok = micro_bucket in {"normal", "probe", "exploration", "unknown", "unavailable"}
+    can_probe = (
+        probe_enabled
+        and book_ok
+        and not ml_negative_edge
+        and signal_value >= probe_min
+        and current_soft_issues <= max_soft
+    )
+    can_explore = exploration_enabled and book_ok and signal_value >= exploration_min
+    if not can_probe and not can_explore:
+        return {
+            "decision_type": "",
+            "entry_mode": "wait",
+            "final_multiplier": None,
+            "force_wait_pullback": True,
+            "soft_issues": ["weak-down-choppy-wait-pullback"],
+            "tags": ["wait-pullback", "weak-choppy-wait-only"],
+            "policy_flags": {**base_flags, "weak_choppy_wait_only_selected": True},
+        }
+
+    if can_probe:
+        decision_type = PolicyDecisionType.PROBE_TRADE.value
+        entry_mode = "weak_choppy_direct_probe_short"
+        multiplier = _weak_choppy_value(config, "short_direct_probe_multiplier", 0.25)
+        issue = "weak-down-choppy-direct-probe"
+        tag = "weak-choppy-probe-now"
+    else:
+        decision_type = PolicyDecisionType.EXPLORATION_TRADE.value
+        entry_mode = "weak_choppy_direct_exploration_short"
+        multiplier = _weak_choppy_value(config, "short_direct_exploration_multiplier", 0.10)
+        issue = "weak-down-choppy-direct-exploration"
+        tag = "weak-choppy-exploration-now"
+
+    if symbol_health == "probation":
+        multiplier *= 0.5
+    elif symbol_health in {"weak", "observe_only"}:
+        multiplier *= 0.35
+    status = str(confirmation_result.get("status", ""))
+    if status == "neutral":
+        multiplier *= 0.75
+    elif status.startswith("mild_"):
+        multiplier = min(multiplier * 0.75, _weak_choppy_value(config, "short_direct_exploration_multiplier", 0.10))
+    if ml_negative_edge:
+        multiplier = min(multiplier, _ml_policy_value(config, "negative_edge_plus_multiple_soft_issues_multiplier", 0.08))
+        decision_type = PolicyDecisionType.EXPLORATION_TRADE.value
+        entry_mode = "weak_choppy_direct_exploration_short"
+        issue = "weak-down-choppy-negative-edge-exploration"
+        tag = "weak-choppy-negative-edge-exploration"
+
+    return {
+        "decision_type": decision_type,
+        "entry_mode": entry_mode,
+        "final_multiplier": round(max(0.0, min(1.0, multiplier)), 6),
+        "force_wait_pullback": False,
+        "soft_issues": [issue],
+        "tags": [tag, "strict-wait-overridden"] if strict_policy.strict_policy_decision == "wait" else [tag],
+        "policy_flags": {
+            **base_flags,
+            "probe_now_with_pending_addon": bool(enable_addon and create_addon),
+            "pending_addon_type": "wait_pullback_short",
+            "pending_addon_multiplier": round(addon_multiplier, 6),
+            "pending_addon_created": False,
+            "strict_wait_overridden_by_relaxed_probe": strict_policy.strict_policy_decision == "wait",
+            "weak_choppy_probe_now_selected": decision_type == PolicyDecisionType.PROBE_TRADE.value,
+            "weak_choppy_exploration_now_selected": decision_type == PolicyDecisionType.EXPLORATION_TRADE.value,
+        },
+    }
+
+
+def _long_regime_decision(
+    *,
+    regime: str,
+    signal_strength: float | None,
+    confirmation: dict[str, object] | None,
+    confirmation_result: dict[str, object],
+    side_policy: dict[str, object],
+    config: object | None,
+    strict_policy: TradePolicy,
+) -> dict[str, object]:
+    signal_value = float(signal_strength or 0.0)
+    ret_window = _float_or_none((confirmation or {}).get("ret_window"))
+    recovery_confirmed = bool(ret_window is not None and ret_window > 0.0)
+    strong_recovery = bool(ret_window is not None and ret_window >= _confirmation_value(config, "mild_adverse_ret", 0.0025))
+    aligned = str(confirmation_result.get("status", "")) == "aligned"
+    base_context = {
+        "regime": regime,
+        "rebound_confirmed": recovery_confirmed,
+        "failed_breakdown": recovery_confirmed,
+        "reclaim_level": (confirmation or {}).get("latest_close") if isinstance(confirmation, dict) else None,
+        "strict_policy_decision": strict_policy.strict_policy_decision,
+        "normal_long_allowed": False,
+        "size_reason": "long_learning_small_size",
+    }
+
+    if side_policy.get("hard_issue"):
+        return _long_decision_result(
+            decision_type=PolicyDecisionType.HARD_REJECT.value,
+            entry_mode="reject",
+            final_multiplier=0.0,
+            soft_issue="",
+            hard_issue=str(side_policy["hard_issue"]),
+            tags=[],
+            force_shadow_only=False,
+            long_context={**base_context, "long_mode": "reject"},
+            strict_policy=strict_policy,
+        )
+
+    if regime == "clean_uptrend":
+        long_cfg = getattr(getattr(getattr(config, "regime_policy", None), "clean_uptrend", None), "long", None)
+        normal_min = float(getattr(long_cfg, "long_direct_normal_min_signal_strength", 0.35))
+        probe_min = float(getattr(long_cfg, "long_direct_probe_min_signal_strength", 0.20))
+        if bool(getattr(long_cfg, "allow_direct_trend_long", True)) and bool(side_policy.get("normal_enabled")) and signal_value >= normal_min:
+            multiplier = float(getattr(long_cfg, "long_normal_multiplier", 0.25))
+            return _long_decision_result(
+                decision_type=PolicyDecisionType.NORMAL_TRADE.value,
+                entry_mode="clean_uptrend_direct_long",
+                final_multiplier=multiplier,
+                soft_issue="clean-uptrend-long-normal-small-size",
+                tags=["long-normal"],
+                force_shadow_only=False,
+                long_context={
+                    **base_context,
+                    "long_mode": "normal",
+                    "normal_long_allowed": True,
+                    "relaxed_policy_decision": PolicyDecisionType.NORMAL_TRADE.value,
+                },
+                strict_policy=strict_policy,
+            )
+        if bool(side_policy.get("probe_enabled")) and signal_value >= probe_min:
+            multiplier = float(getattr(long_cfg, "long_probe_multiplier", 0.15))
+            return _long_decision_result(
+                decision_type=PolicyDecisionType.PROBE_TRADE.value,
+                entry_mode="clean_uptrend_direct_probe_long",
+                final_multiplier=multiplier,
+                soft_issue="clean-uptrend-long-probe",
+                tags=["long-probe"],
+                force_shadow_only=False,
+                long_context={**base_context, "long_mode": "probe"},
+                strict_policy=strict_policy,
+            )
+        return _long_shadow_result(base_context, strict_policy, "clean_uptrend_long_signal_too_weak")
+
+    if regime == "mixed":
+        long_cfg = getattr(getattr(getattr(config, "regime_policy", None), "mixed", None), "long", None)
+        if bool(getattr(long_cfg, "require_5m_aligned_or_recovery", True)) and not (aligned and recovery_confirmed):
+            return _long_shadow_result(base_context, strict_policy, "mixed_long_requires_recovery")
+        if bool(getattr(long_cfg, "allow_long_probe", True)) and signal_value >= 0.20:
+            multiplier = float(getattr(long_cfg, "long_probe_multiplier", 0.10))
+            return _long_decision_result(
+                decision_type=PolicyDecisionType.PROBE_TRADE.value,
+                entry_mode="rebound_probe_long",
+                final_multiplier=multiplier,
+                soft_issue="mixed-long-recovery-probe",
+                tags=["long-probe"],
+                force_shadow_only=False,
+                long_context={**base_context, "long_mode": "probe"},
+                strict_policy=strict_policy,
+            )
+        if bool(getattr(long_cfg, "allow_long_exploration", True)):
+            multiplier = float(getattr(long_cfg, "long_exploration_multiplier", 0.05))
+            return _long_decision_result(
+                decision_type=PolicyDecisionType.EXPLORATION_TRADE.value,
+                entry_mode="rebound_exploration_long",
+                final_multiplier=multiplier,
+                soft_issue="mixed-long-recovery-exploration",
+                tags=["long-exploration"],
+                force_shadow_only=False,
+                long_context={**base_context, "long_mode": "exploration"},
+                strict_policy=strict_policy,
+            )
+
+    if regime == "range_chop":
+        long_cfg = getattr(getattr(getattr(config, "regime_policy", None), "range_chop", None), "long", None)
+        if bool(getattr(long_cfg, "require_failed_breakdown_or_reclaim", True)) and not recovery_confirmed:
+            return _long_shadow_result(base_context, strict_policy, "range_chop_long_requires_reclaim")
+        if bool(getattr(long_cfg, "allow_mean_reversion_long_exploration", True)):
+            multiplier = float(getattr(long_cfg, "long_exploration_multiplier", 0.05))
+            return _long_decision_result(
+                decision_type=PolicyDecisionType.EXPLORATION_TRADE.value,
+                entry_mode="range_failed_breakdown_long",
+                final_multiplier=multiplier,
+                soft_issue="range-chop-long-reclaim-exploration",
+                tags=["long-exploration", "range-chop"],
+                force_shadow_only=False,
+                long_context={**base_context, "long_mode": "exploration"},
+                strict_policy=strict_policy,
+            )
+
+    if regime == "weak_down_choppy":
+        long_cfg = getattr(getattr(getattr(config, "regime_policy", None), "weak_down_choppy", None), "long", None)
+        if long_cfg is None:
+            long_cfg = getattr(getattr(config, "regime_policy", None), "weak_down_choppy_long", None)
+        if not strong_recovery:
+            return _long_shadow_result(base_context, strict_policy, "weak_down_choppy_long_requires_rebound")
+        if bool(getattr(long_cfg, "allow_rebound_probe_long", True)) and signal_value >= 0.20:
+            multiplier = _at_least_min_trade_multiplier(
+                config,
+                float(getattr(long_cfg, "long_probe_multiplier", 0.05)),
+            )
+            return _long_decision_result(
+                decision_type=PolicyDecisionType.PROBE_TRADE.value,
+                entry_mode="rebound_probe_long",
+                final_multiplier=multiplier,
+                soft_issue="weak-down-choppy-rebound-long-probe",
+                tags=["long-probe", "weak-down-choppy-long"],
+                force_shadow_only=False,
+                long_context={**base_context, "long_mode": "probe"},
+                strict_policy=strict_policy,
+            )
+        if bool(getattr(long_cfg, "allow_rebound_exploration_long", True)):
+            multiplier = _at_least_min_trade_multiplier(
+                config,
+                float(getattr(long_cfg, "long_exploration_multiplier", 0.03)),
+            )
+            return _long_decision_result(
+                decision_type=PolicyDecisionType.EXPLORATION_TRADE.value,
+                entry_mode="rebound_exploration_long",
+                final_multiplier=multiplier,
+                soft_issue="weak-down-choppy-rebound-long-exploration",
+                tags=["long-exploration", "weak-down-choppy-long"],
+                force_shadow_only=False,
+                long_context={**base_context, "long_mode": "exploration"},
+                strict_policy=strict_policy,
+            )
+
+    if regime == "market_selloff_impulse":
+        long_cfg = getattr(getattr(config, "market_selloff_impulse", None), "long", None)
+        if bool(getattr(long_cfg, "require_reclaim_confirmation", True)) and not strong_recovery:
+            return _long_shadow_result(base_context, strict_policy, "market_selloff_long_requires_reclaim")
+        if bool(getattr(long_cfg, "allow_capitulation_bounce_probe", True)):
+            multiplier = _at_least_min_trade_multiplier(
+                config,
+                float(getattr(long_cfg, "capitulation_bounce_probe_multiplier", 0.03)),
+            )
+            return _long_decision_result(
+                decision_type=PolicyDecisionType.PROBE_TRADE.value,
+                entry_mode="capitulation_bounce_probe_long",
+                final_multiplier=multiplier,
+                soft_issue="market-selloff-capitulation-bounce-long-probe",
+                tags=["long-probe", "selloff-bounce"],
+                force_shadow_only=False,
+                long_context={**base_context, "long_mode": "probe"},
+                strict_policy=strict_policy,
+            )
+
+    if bool(side_policy.get("probe_enabled")) and signal_value >= 0.20:
+        return _long_decision_result(
+            decision_type=PolicyDecisionType.PROBE_TRADE.value,
+            entry_mode="trend_long",
+            final_multiplier=float(side_policy.get("multiplier", 0.10) or 0.10),
+            soft_issue="long-generic-probe",
+            tags=["long-probe"],
+            force_shadow_only=False,
+            long_context={**base_context, "long_mode": "probe"},
+            strict_policy=strict_policy,
+        )
+    return _long_shadow_result(base_context, strict_policy, "long_policy_shadow_only")
+
+
+def _long_decision_result(
+    *,
+    decision_type: str,
+    entry_mode: str,
+    final_multiplier: float | None,
+    soft_issue: str,
+    tags: list[str],
+    force_shadow_only: bool,
+    long_context: dict[str, object],
+    strict_policy: TradePolicy,
+    hard_issue: str = "",
+) -> dict[str, object]:
+    context = {
+        **long_context,
+        "relaxed_policy_decision": decision_type,
+    }
+    return {
+        "decision_type": decision_type,
+        "entry_mode": entry_mode,
+        "final_multiplier": final_multiplier,
+        "force_wait_pullback": False,
+        "force_shadow_only": force_shadow_only,
+        "soft_issue": soft_issue,
+        "hard_issue": hard_issue,
+        "tags": tags,
+        "long_context": context,
+        "policy_flags": {
+            "long_probe_trade": decision_type == PolicyDecisionType.PROBE_TRADE.value,
+            "long_exploration_trade": decision_type == PolicyDecisionType.EXPLORATION_TRADE.value,
+            "long_normal_trade": decision_type == PolicyDecisionType.NORMAL_TRADE.value,
+            "strict_reject_overridden_by_relaxed_long_probe": (
+                decision_type in {PolicyDecisionType.PROBE_TRADE.value, PolicyDecisionType.EXPLORATION_TRADE.value}
+                and strict_policy.strict_policy_decision == "reject"
+            ),
+        },
+    }
+
+
+def _long_shadow_result(
+    base_context: dict[str, object],
+    strict_policy: TradePolicy,
+    reason: str,
+) -> dict[str, object]:
+    return _long_decision_result(
+        decision_type=PolicyDecisionType.SHADOW_ONLY.value,
+        entry_mode="wait_failed_breakdown_reclaim_long",
+        final_multiplier=0.0,
+        soft_issue=reason.replace("_", "-"),
+        tags=["long-shadow-only"],
+        force_shadow_only=True,
+        long_context={**base_context, "long_mode": "shadow_only", "reason": reason},
+        strict_policy=strict_policy,
     )
 
 
@@ -883,6 +1310,33 @@ def _float_or_none(value: object) -> float | None:
 
 def _learning_mode_value(config: object | None, name: str, default: Any) -> Any:
     return getattr(getattr(config, "learning_mode", None), name, default)
+
+
+def _weak_choppy_value(config: object | None, name: str, default: Any) -> Any:
+    policy = getattr(getattr(config, "regime_policy", None), "weak_down_choppy", None)
+    return getattr(policy, name, default)
+
+
+def _weak_choppy_short_confirmation_mode(config: object | None, status: str) -> str:
+    policy = getattr(getattr(config, "regime_policy", None), "weak_down_choppy", None)
+    confirmation = getattr(policy, "short_confirmation", None)
+    normalized = status.strip().lower()
+    if normalized in {"aligned", "unavailable", ""}:
+        return str(getattr(confirmation, "aligned_5m_mode", "probe"))
+    if normalized == "neutral":
+        return str(getattr(confirmation, "neutral_5m_mode", "probe"))
+    if normalized.startswith("mild_"):
+        return str(getattr(confirmation, "mild_rebound_5m_mode", "exploration_or_wait_addon"))
+    if normalized.startswith("strong_"):
+        return str(getattr(confirmation, "strong_rebound_5m_mode", "wait_pullback_only"))
+    if normalized.startswith("extreme_"):
+        return str(getattr(confirmation, "extreme_adverse_5m_mode", "shadow_or_reject"))
+    return "probe"
+
+
+def _at_least_min_trade_multiplier(config: object | None, value: float) -> float:
+    min_value = float(_learning_mode_value(config, "min_effective_risk_multiplier_to_trade", 0.05))
+    return round(max(0.0, min(1.0, max(float(value), min_value))), 6)
 
 
 def _ml_policy_value(config: object | None, name: str, default: float) -> float:

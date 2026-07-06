@@ -254,10 +254,12 @@ class PortfolioState:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "PortfolioState":
-        positions = {
-            symbol: Position.from_dict(position_payload)
-            for symbol, position_payload in payload.get("positions", {}).items()
-        }
+        positions = {}
+        for symbol, position_payload in payload.get("positions", {}).items():
+            position = Position.from_dict(position_payload)
+            if position.quantity_lots <= 0:
+                continue
+            positions[symbol] = position
         return cls(
             cash=float(payload.get("cash", 0.0)),
             realized_pnl=float(payload.get("realized_pnl", 0.0)),

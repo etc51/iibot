@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -67,7 +68,10 @@ class LocalPaperBroker:
                 exit_price=float(item["exit_price"]),
                 gross_pnl=float(item["gross_pnl"]),
                 net_pnl=float(item["net_pnl"]),
-                reason=item["reason"],
+                reason=_normalized_loaded_trade_reason(
+                    str(item["reason"]),
+                    net_pnl=float(item["net_pnl"]),
+                ),
                 signal_strength=float(item.get("signal_strength", 0.0)),
                 entry_reason=str(item.get("entry_reason", "")),
                 entry_context_score=float(item.get("entry_context_score", 0.0)),
@@ -123,7 +127,10 @@ class LocalPaperBroker:
         self.portfolio.peak_equity = max(self.portfolio.peak_equity, equity)
         return equity
 
-    def open_position(self, signal: Signal, quantity_lots: int, timestamp: datetime) -> Position:
+    def open_position(self, signal: Signal, quantity_lots: int, timestamp: datetime) -> Position | None:
+        if quantity_lots < 1:
+            return None
+
         is_buy = signal.direction == SignalDirection.LONG
         fill_price = self._slipped_price(signal.entry_price, is_buy=is_buy)
         units = quantity_lots * signal.instrument.lot_size
@@ -197,6 +204,7 @@ class LocalPaperBroker:
 
         is_buy = position.direction == SignalDirection.SHORT
         fill_price = self._slipped_price(price, is_buy=is_buy)
+        exit_reason = self._normalized_exit_reason(reason, position, trigger_price=price)
         units = position.quantity_units
         notional = fill_price * units
         commission = self._commission(notional)
@@ -228,7 +236,7 @@ class LocalPaperBroker:
             exit_price=fill_price,
             gross_pnl=gross_pnl,
             net_pnl=net_pnl,
-            reason=reason.value,
+            reason=exit_reason.value,
             signal_strength=position.signal_strength,
             entry_reason=position.entry_reason,
             entry_context_score=position.entry_context_score,
@@ -254,7 +262,7 @@ class LocalPaperBroker:
                 "quantity_lots": position.quantity_lots,
                 "fill_price": fill_price,
                 "commission": commission,
-                "reason": reason.value,
+                "reason": exit_reason.value,
                 "net_pnl": net_pnl,
                 "gross_pnl": gross_pnl,
                 "entry_time": position.opened_at.isoformat(),
@@ -359,5 +367,30 @@ class LocalPaperBroker:
         factor = 1 + (self.slippage_bps / 10_000)
         return price * factor if is_buy else price / factor
 
+    @staticmethod
+    def _normalized_exit_reason(
+        reason: ExitReason,
+        position: Position,
+        *,
+        trigger_price: float,
+    ) -> ExitReason:
+        if reason != ExitReason.STOP_LOSS:
+            return reason
+        if math.isclose(trigger_price, position.entry_price, rel_tol=1e-9, abs_tol=1e-9):
+            return ExitReason.BREAKEVEN_STOP
+        if position.direction == SignalDirection.LONG:
+            if trigger_price > position.entry_price:
+                return ExitReason.PROFIT_PROTECT_STOP
+            return ExitReason.STOP_LOSS
+        if trigger_price < position.entry_price:
+            return ExitReason.PROFIT_PROTECT_STOP
+        return ExitReason.STOP_LOSS
+
     def _commission(self, notional: float) -> float:
         return abs(notional) * self.commission_bps / 10_000
+
+
+def _normalized_loaded_trade_reason(reason: str, *, net_pnl: float) -> str:
+    if reason == ExitReason.STOP_LOSS.value and net_pnl > 0:
+        return ExitReason.PROFIT_PROTECT_STOP.value
+    return reason

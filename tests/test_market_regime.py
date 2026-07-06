@@ -4,7 +4,12 @@ from datetime import datetime, timedelta, timezone
 
 from samosbor.autonomy.market_regime import detect_market_regime
 from samosbor.autonomy.regime_policy import resolve
-from samosbor.config import LearningModeSection, LearningRiskSection
+from samosbor.config import (
+    LearningModeSection,
+    LearningRiskSection,
+    RegimePolicySection,
+    SidePolicySection,
+)
 from samosbor.domain import Candle, SignalDirection
 
 
@@ -27,6 +32,19 @@ def _candles_from_closes(closes: list[float]) -> list[Candle]:
         )
         previous = close
     return candles
+
+
+def _relaxed_policy_config():
+    return type(
+        "PolicyConfig",
+        (),
+        {
+            "learning_mode": LearningModeSection(enabled=True, profile="relaxed_paper_learning"),
+            "learning_risk": LearningRiskSection(),
+            "regime_policy": RegimePolicySection(),
+            "side_policy": SidePolicySection(),
+        },
+    )()
 
 
 def test_regime_detector_clean_downtrend():
@@ -159,14 +177,7 @@ def test_weak_symbol_observe_only_blocks_entry():
 
 
 def test_relaxed_learning_allows_probe_when_strict_would_wait_pullback():
-    config = type(
-        "PolicyConfig",
-        (),
-        {
-            "learning_mode": LearningModeSection(enabled=True, profile="relaxed_paper_learning"),
-            "learning_risk": LearningRiskSection(),
-        },
-    )()
+    config = _relaxed_policy_config()
 
     policy = resolve(
         regime="weak_down_choppy",
@@ -187,3 +198,156 @@ def test_relaxed_learning_allows_probe_when_strict_would_wait_pullback():
     assert policy.would_strict_policy_trade is False
     assert policy.relaxed_only_trade is True
     assert policy.risk_multiplier < 1.0
+    assert policy.entry_mode == "weak_choppy_direct_probe_short"
+    assert policy.as_metadata()["probe_now_with_pending_addon"] is True
+    assert policy.as_metadata()["would_have_waited_pullback_strict"] is True
+
+
+def test_current_like_ydex_signal_becomes_probe_not_wait_only():
+    policy = resolve(
+        regime="weak_down_choppy",
+        symbol="YDEX",
+        side=SignalDirection.SHORT,
+        ml_feedback={"available": True, "blocks_entry": False, "action": "allow_entry"},
+        book={"available": True, "spread_bps": 8.0, "entry_liquidity_cover": 2.5, "side_imbalance": 0.1},
+        confirmation={"available": True, "ret_window": 0.001, "bars": 3},
+        learning_mode_enabled=True,
+        learning_profile="relaxed_paper_learning",
+        signal_strength=0.24,
+        trend_strength=0.0015,
+        adx=18.0,
+        config=_relaxed_policy_config(),
+    )
+
+    assert policy.allow_trade is True
+    assert policy.decision_type == "probe_trade"
+    assert policy.entry_mode == "weak_choppy_direct_probe_short"
+    assert policy.strict_policy_decision == "wait"
+    assert policy.risk_multiplier >= 0.05
+    assert "weak-down-choppy-direct-probe" in policy.soft_issues
+
+
+def test_current_like_ozon_probation_reduces_size_not_wait_only():
+    policy = resolve(
+        regime="weak_down_choppy",
+        symbol="OZON",
+        side=SignalDirection.SHORT,
+        ml_feedback={"available": True, "blocks_entry": False, "action": "allow_entry"},
+        book={"available": True, "spread_bps": 8.0, "entry_liquidity_cover": 2.5, "side_imbalance": 0.1},
+        confirmation={"available": True, "ret_window": 0.001, "bars": 3},
+        symbol_health="probation",
+        learning_mode_enabled=True,
+        learning_profile="relaxed_paper_learning",
+        signal_strength=0.24,
+        trend_strength=0.0015,
+        adx=18.0,
+        config=_relaxed_policy_config(),
+    )
+
+    assert policy.allow_trade is True
+    assert policy.decision_type == "probe_trade"
+    assert policy.entry_mode == "weak_choppy_direct_probe_short"
+    assert "symbol-probation:OZON" in policy.soft_issues
+    assert 0.05 <= policy.risk_multiplier <= 0.15
+
+
+def test_weak_down_choppy_short_strong_rebound_still_waits_pullback():
+    policy = resolve(
+        regime="weak_down_choppy",
+        symbol="SBER",
+        side=SignalDirection.SHORT,
+        book={"available": True, "spread_bps": 8.0, "entry_liquidity_cover": 2.5, "side_imbalance": 0.1},
+        confirmation={"available": True, "ret_window": 0.006, "bars": 3},
+        learning_mode_enabled=True,
+        learning_profile="relaxed_paper_learning",
+        signal_strength=0.7,
+        trend_strength=0.003,
+        adx=25.0,
+        config=_relaxed_policy_config(),
+    )
+
+    assert policy.allow_trade is False
+    assert policy.decision_type == "wait_pullback"
+    assert policy.entry_mode == "wait"
+
+
+def test_weak_down_choppy_short_extreme_book_still_rejects():
+    policy = resolve(
+        regime="weak_down_choppy",
+        symbol="SBER",
+        side=SignalDirection.SHORT,
+        book={"available": True, "spread_bps": 8.0, "entry_liquidity_cover": 2.5, "side_imbalance": -0.9},
+        learning_mode_enabled=True,
+        learning_profile="relaxed_paper_learning",
+        signal_strength=0.7,
+        trend_strength=0.003,
+        adx=25.0,
+        config=_relaxed_policy_config(),
+    )
+
+    assert policy.allow_trade is False
+    assert policy.decision_type == "hard_reject"
+    assert "adverse-book-below-hard-limit" in policy.hard_issues
+
+
+def test_clean_uptrend_long_can_open_probe_or_normal():
+    policy = resolve(
+        regime="clean_uptrend",
+        symbol="SBER",
+        side=SignalDirection.LONG,
+        confirmation={"available": True, "ret_window": 0.003, "bars": 3},
+        long_side_enabled=True,
+        learning_mode_enabled=True,
+        learning_profile="relaxed_paper_learning",
+        signal_strength=0.42,
+        trend_strength=0.003,
+        adx=25.0,
+        config=_relaxed_policy_config(),
+    )
+
+    assert policy.allow_trade is True
+    assert policy.decision_type == "normal_trade"
+    assert policy.entry_mode == "clean_uptrend_direct_long"
+    assert policy.risk_multiplier <= 0.25
+
+
+def test_weak_down_choppy_long_rebound_can_open_tiny_probe():
+    policy = resolve(
+        regime="weak_down_choppy",
+        symbol="SBER",
+        side=SignalDirection.LONG,
+        confirmation={"available": True, "ret_window": 0.004, "bars": 3, "latest_close": 101.0},
+        long_side_enabled=True,
+        learning_mode_enabled=True,
+        learning_profile="relaxed_paper_learning",
+        signal_strength=0.28,
+        trend_strength=0.0015,
+        adx=18.0,
+        config=_relaxed_policy_config(),
+    )
+
+    assert policy.allow_trade is True
+    assert policy.decision_type == "probe_trade"
+    assert policy.entry_mode == "rebound_probe_long"
+    assert policy.risk_multiplier <= 0.05
+    assert policy.as_metadata()["long_probe_trade"] is True
+
+
+def test_weak_down_choppy_long_without_rebound_is_shadow_only():
+    policy = resolve(
+        regime="weak_down_choppy",
+        symbol="SBER",
+        side=SignalDirection.LONG,
+        confirmation={"available": True, "ret_window": -0.001, "bars": 3},
+        long_side_enabled=True,
+        learning_mode_enabled=True,
+        learning_profile="relaxed_paper_learning",
+        signal_strength=0.28,
+        trend_strength=0.0015,
+        adx=18.0,
+        config=_relaxed_policy_config(),
+    )
+
+    assert policy.allow_trade is False
+    assert policy.decision_type == "shadow_only"
+    assert policy.entry_mode == "wait_failed_breakdown_reclaim_long"

@@ -359,7 +359,7 @@ def render_dashboard_html(payload: dict[str, object]) -> str:
     exposure_rub = float(latest_cycle.get("gross_exposure_rub", 0.0))
     realized_pnl_rub = float(portfolio_state.get("realized_pnl_rub", 0.0))
     daily_pnl_rub = float(latest_report_summary.get("net_pnl_rub", 0.0))
-    open_positions = int(latest_cycle.get("open_positions", portfolio_state.get("open_positions", 0)))
+    open_positions = int(portfolio_state.get("open_positions", 0))
     resolved_feedback = int(runtime["signal_feedback"]["resolved_signals"])
     active_override_count = len(dict(effective_runtime["applied_strategy_overrides"]))
     active_restriction_count = (
@@ -1278,6 +1278,8 @@ def _positions_from_state(
     for symbol, position in sorted(positions_payload.items()):
         direction = str(position.get("direction", ""))
         quantity_lots = int(position.get("quantity_lots", 0))
+        if quantity_lots <= 0:
+            continue
         entry_price = float(position.get("entry_price", 0.0))
         current_price = float(position.get("current_price", 0.0))
         stop_price = float(position.get("stop_price", 0.0))

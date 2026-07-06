@@ -1302,12 +1302,19 @@ class TradingOrchestrator:
                                 ),
                             )
                             if microstructure_block_reason is None:
-                                microstructure_block_reason = self._learning_mode_limit_reason(
+                                (
+                                    signal_for_entry,
+                                    entry_quantity_lots,
+                                    microstructure_block_reason,
+                                    learning_cap_events,
+                                ) = self._apply_learning_caps(
                                     broker,
                                     signal_for_entry,
+                                    quantity_lots=entry_quantity_lots,
                                     timestamp=latest.timestamp,
                                     extra_events=cycle_events,
                                 )
+                                cycle_events.extend(learning_cap_events)
                                 if microstructure_block_reason is not None:
                                     entry_quantity_lots = 0
                             if microstructure_block_reason is None:
@@ -1320,10 +1327,16 @@ class TradingOrchestrator:
                                     market_regime=market_regime,
                                 )
                                 if pending_created_event is not None:
+                                    signal_for_entry = self._signal_with_pending_addon_metadata(
+                                        signal_for_entry,
+                                        pending_created_event,
+                                    )
                                     cycle_events.append(pending_created_event)
                                 policy = signal_for_entry.metadata.get("regime_policy", {})
                                 if isinstance(policy, dict) and policy.get("entry_mode") == "wait":
                                     microstructure_block_reason = "entry deferred for pullback short"
+                            if microstructure_block_reason is None and entry_quantity_lots < 1:
+                                microstructure_block_reason = "entry blocked by adaptive risk size < 1 lot"
 
                 event = {
                     "timestamp": latest.timestamp.isoformat(),
@@ -1360,6 +1373,14 @@ class TradingOrchestrator:
                 if strict_shadow_id:
                     event["strict_shadow_trade_id"] = strict_shadow_id
                     event["metadata"]["strict_shadow_trade_id"] = strict_shadow_id
+                cycle_events.extend(
+                    self._policy_auxiliary_events(
+                        signal_for_entry,
+                        latest.timestamp,
+                        approved=bool(decision.approved and microstructure_block_reason is None),
+                        block_reason=microstructure_block_reason,
+                    )
+                )
                 cycle_events.append(event)
                 if decision.approved:
                     if microstructure_block_reason is None:
@@ -1499,6 +1520,29 @@ class TradingOrchestrator:
         item = dict(pending_result.get("item", {}))
         event_timestamp = str(pending_result.get("timestamp", timestamp.isoformat()))
         fill_timestamp = self._parse_event_timestamp(event_timestamp, fallback=timestamp)
+        if bool(item.get("addon_shadow_only_due_to_no_pyramiding", False)):
+            return [
+                {
+                    "timestamp": event_timestamp,
+                    "symbol": item.get("symbol", ""),
+                    "action": "pending-entry",
+                    "status": "shadow-triggered",
+                    "state": item.get("state", ""),
+                    "reason": "pending add-on observed only because pyramiding is unsupported",
+                    "metadata": {
+                        "id": item.get("id", ""),
+                        "created_at": item.get("created_at", ""),
+                        "triggered_at": item.get("triggered_at", ""),
+                        "bars_seen": item.get("bars_seen", 0),
+                        "quantity_lots": item.get("quantity_lots", 0),
+                        "is_addon": item.get("is_addon", False),
+                        "parent_entry_mode": item.get("parent_entry_mode", ""),
+                        "parent_decision_type": item.get("parent_decision_type", ""),
+                        "addon_multiplier": item.get("addon_multiplier", 0.0),
+                        "addon_shadow_only_due_to_no_pyramiding": True,
+                    },
+                }
+            ]
         signal = pending_entry_signal(
             item,
             reward_to_risk=self.config.strategy.reward_to_risk,
@@ -1508,6 +1552,7 @@ class TradingOrchestrator:
         signal_for_entry = signal
         entry_quantity_lots = min(decision.quantity_lots, approved_pending_quantity)
         block_reason = None
+        learning_cap_events: list[dict[str, object]] = []
         if decision.approved and entry_quantity_lots < 1:
             block_reason = "entry blocked by pending-entry quantity limit"
         if decision.approved and block_reason is None:
@@ -1536,13 +1581,21 @@ class TradingOrchestrator:
                     entry_mode="pullback_short",
                 )
                 if block_reason is None:
-                    block_reason = self._learning_mode_limit_reason(
+                    (
+                        signal_for_entry,
+                        entry_quantity_lots,
+                        block_reason,
+                        learning_cap_events,
+                    ) = self._apply_learning_caps(
                         broker,
                         signal_for_entry,
+                        quantity_lots=entry_quantity_lots,
                         timestamp=fill_timestamp,
                     )
                     if block_reason is not None:
                         entry_quantity_lots = 0
+                if block_reason is None and entry_quantity_lots < 1:
+                    block_reason = "entry blocked by adaptive risk size < 1 lot"
 
         pending_event = {
             "timestamp": event_timestamp,
@@ -1597,7 +1650,7 @@ class TradingOrchestrator:
             signal_event["metadata"]["strict_shadow_trade_id"] = strict_shadow_id
         if decision.approved and block_reason is None:
             broker.open_position(signal_for_entry, entry_quantity_lots, fill_timestamp)
-        return [pending_event, signal_event]
+        return [pending_event, *learning_cap_events, signal_event]
 
     def _signal_with_runtime_policy(
         self,
@@ -1712,26 +1765,53 @@ class TradingOrchestrator:
         market_regime,
     ) -> dict[str, object] | None:
         policy = signal.metadata.get("regime_policy", {})
-        if not isinstance(policy, dict) or policy.get("entry_mode") != "wait":
+        if not isinstance(policy, dict):
             return None
+        is_wait_only = policy.get("entry_mode") == "wait"
+        create_addon = bool(policy.get("probe_now_with_pending_addon", False))
+        if not is_wait_only and not create_addon:
+            return None
+        addon_multiplier = float(policy.get("pending_addon_multiplier", 0.0) or 0.0)
+        pending_quantity_lots = int(quantity_lots)
+        addon_metadata: dict[str, object] = {}
+        if create_addon:
+            pending_quantity_lots = self._quantity_after_multiplier(
+                max(1, int(quantity_lots)),
+                addon_multiplier or 0.15,
+            )
+            addon_metadata = {
+                "is_addon": True,
+                "parent_entry_mode": policy.get("entry_mode", ""),
+                "parent_decision_type": policy.get("actual_policy_decision", policy.get("decision_type", "")),
+                "addon_multiplier": addon_multiplier or 0.15,
+                "strict_policy_original_decision": policy.get("strict_policy_decision", "unknown"),
+                "relaxed_probe_opened": True,
+                "addon_shadow_only_due_to_no_pyramiding": True,
+            }
         item = record_pending_pullback_short(
             feedback_payload,
             signal,
             candles=candles,
             timestamp=timestamp,
-            quantity_lots=quantity_lots,
+            quantity_lots=pending_quantity_lots,
             policy_metadata=policy,
             market_regime=market_regime.as_event(),
+            addon_metadata=addon_metadata,
         )
         if item is None:
             return None
+        reason = (
+            "weak choppy probe opened; pending pullback add-on created"
+            if create_addon
+            else "entry deferred for pullback short"
+        )
         return {
             "timestamp": timestamp.isoformat(),
             "symbol": signal.instrument.symbol,
             "action": "pending-entry",
             "status": "created",
             "state": item.get("state", ""),
-            "reason": "entry deferred for pullback short",
+            "reason": reason,
             "metadata": {
                 "id": item.get("id", ""),
                 "entry_price": item.get("entry_price", 0.0),
@@ -1739,9 +1819,53 @@ class TradingOrchestrator:
                 "failed_rebound_price": item.get("failed_rebound_price", 0.0),
                 "expires_after_bars": item.get("expires_after_bars", 0),
                 "quantity_lots": item.get("quantity_lots", 0),
+                "is_addon": item.get("is_addon", False),
+                "parent_entry_mode": item.get("parent_entry_mode", ""),
+                "parent_decision_type": item.get("parent_decision_type", ""),
+                "addon_multiplier": item.get("addon_multiplier", 0.0),
+                "strict_policy_original_decision": item.get("strict_policy_original_decision", ""),
+                "relaxed_probe_opened": item.get("relaxed_probe_opened", False),
+                "addon_shadow_only_due_to_no_pyramiding": item.get(
+                    "addon_shadow_only_due_to_no_pyramiding",
+                    False,
+                ),
+                "event_type": (
+                    "weak_choppy_probe_now_pending_addon_created"
+                    if create_addon
+                    else "weak_choppy_wait_only_selected"
+                ),
                 "regime_policy": policy,
             },
         }
+
+    @staticmethod
+    def _signal_with_pending_addon_metadata(signal, pending_event: dict[str, object]):
+        event_metadata = pending_event.get("metadata", {})
+        if not isinstance(event_metadata, dict):
+            return signal
+        if not bool(event_metadata.get("is_addon", False)):
+            return signal
+        metadata = dict(signal.metadata)
+        policy = dict(metadata.get("regime_policy", {})) if isinstance(metadata.get("regime_policy"), dict) else {}
+        addon_fields = {
+            "pending_addon_created": True,
+            "pending_addon_id": event_metadata.get("id", ""),
+            "pending_addon_type": policy.get("pending_addon_type", "wait_pullback_short"),
+            "pending_addon_multiplier": event_metadata.get(
+                "addon_multiplier",
+                policy.get("pending_addon_multiplier", 0.0),
+            ),
+            "addon_shadow_only_due_to_no_pyramiding": event_metadata.get(
+                "addon_shadow_only_due_to_no_pyramiding",
+                False,
+            ),
+        }
+        metadata.update(addon_fields)
+        if policy:
+            policy.update(addon_fields)
+            metadata["regime_policy"] = policy
+            metadata["regime_policy_audit"] = policy
+        return replace(signal, metadata=metadata)
 
     def _policy_event_fields(self, signal) -> dict[str, object]:
         policy = signal.metadata.get("regime_policy", {})
@@ -1763,6 +1887,76 @@ class TradingOrchestrator:
             "symbol_health_status": policy.get("symbol_health", "unknown"),
             "relaxed_only_trade": policy.get("relaxed_only_trade", False),
         }
+
+    def _policy_auxiliary_events(
+        self,
+        signal,
+        timestamp: datetime,
+        *,
+        approved: bool,
+        block_reason: str | None,
+    ) -> list[dict[str, object]]:
+        policy = signal.metadata.get("regime_policy", {})
+        if not isinstance(policy, dict):
+            return []
+        metadata = dict(signal.metadata)
+        base = {
+            "timestamp": timestamp.isoformat(),
+            "symbol": signal.instrument.symbol,
+            "side": signal.direction.value,
+            "regime": metadata.get("market_regime", {}).get("regime", "")
+            if isinstance(metadata.get("market_regime"), dict)
+            else "",
+            "signal_strength": signal.strength,
+            "actual_policy_decision": policy.get("actual_policy_decision", policy.get("decision_type", "")),
+            "strict_policy_decision": policy.get("strict_policy_decision", "unknown"),
+            "relaxed_only_trade": policy.get("relaxed_only_trade", False),
+            "entry_mode": policy.get("entry_mode", ""),
+            "risk_multiplier": policy.get("risk_multiplier", 0.0),
+            "effective_risk_multiplier": policy.get("effective_risk_multiplier", 0.0),
+            "soft_issues": policy.get("soft_issues", []),
+            "hard_issues": policy.get("hard_issues", []),
+            "reasons": policy.get("reasons", []),
+            "tags": policy.get("tags", []),
+            "pending_addon_created": policy.get("pending_addon_created", False),
+            "pending_addon_id": policy.get("pending_addon_id", ""),
+            "long_context": policy.get("long_context", {}),
+            "ml_action": (
+                metadata.get("ml_learning", {}).get("action", "")
+                if isinstance(metadata.get("ml_learning"), dict)
+                else ""
+            ),
+            "ml_expected_position": (
+                metadata.get("ml_learning", {}).get("expected_pnl_position_rub", 0.0)
+                if isinstance(metadata.get("ml_learning"), dict)
+                else 0.0
+            ),
+            "block_reason": block_reason or "",
+        }
+        events: list[dict[str, object]] = []
+        entry_mode = str(policy.get("entry_mode", ""))
+        decision = str(policy.get("actual_policy_decision", policy.get("decision_type", "")))
+        if entry_mode.startswith("weak_choppy_direct_"):
+            events.append({**base, "action": "weak_choppy_probe_now_selected"})
+            if bool(policy.get("pending_addon_created", False)):
+                events.append({**base, "action": "weak_choppy_probe_now_pending_addon_created"})
+            if approved:
+                events.append({**base, "action": "weak_choppy_probe_now_opened"})
+            else:
+                events.append({**base, "action": "weak_choppy_probe_now_rejected"})
+        elif entry_mode == "wait":
+            events.append({**base, "action": "weak_choppy_wait_only_selected"})
+        if bool(policy.get("strict_wait_overridden_by_relaxed_probe", False)):
+            events.append({**base, "action": "strict_wait_overridden_by_relaxed_probe"})
+        if signal.direction == SignalDirection.LONG:
+            if decision == PolicyDecisionType.PROBE_TRADE.value:
+                events.append({**base, "action": "long_probe_selected"})
+                events.append({**base, "action": "long_probe_opened" if approved else "long_probe_rejected"})
+            elif decision == PolicyDecisionType.EXPLORATION_TRADE.value:
+                events.append({**base, "action": "long_exploration_opened" if approved else "long_probe_rejected"})
+            elif decision == PolicyDecisionType.SHADOW_ONLY.value:
+                events.append({**base, "action": "long_shadow_only_created"})
+        return events
 
     def _record_rejected_shadow_if_needed(
         self,
@@ -1849,11 +2043,29 @@ class TradingOrchestrator:
         timestamp: datetime,
         extra_events: list[dict[str, object]] | None = None,
     ) -> str | None:
+        _, _, reason, _ = self._apply_learning_caps(
+            broker,
+            signal,
+            quantity_lots=1,
+            timestamp=timestamp,
+            extra_events=extra_events,
+        )
+        return reason
+
+    def _apply_learning_caps(
+        self,
+        broker,
+        signal,
+        *,
+        quantity_lots: int,
+        timestamp: datetime,
+        extra_events: list[dict[str, object]] | None = None,
+    ):
         if not self._relaxed_learning_enabled():
-            return None
+            return signal, quantity_lots, None, []
         policy = signal.metadata.get("regime_policy", {})
         if not isinstance(policy, dict):
-            return None
+            return signal, quantity_lots, None, []
         decision_type = str(policy.get("decision_type", ""))
         mode_name = {
             PolicyDecisionType.NORMAL_TRADE.value: "normal",
@@ -1861,41 +2073,309 @@ class TradingOrchestrator:
             PolicyDecisionType.EXPLORATION_TRADE.value: "exploration",
         }.get(decision_type)
         if mode_name is None:
-            return None
+            return signal, quantity_lots, None, []
         mode_config = getattr(self.config.learning_risk, mode_name)
-        open_positions = sum(
+        mode_open_positions = sum(
             1
             for position in broker.portfolio.positions.values()
             if self._position_policy_mode(position) == decision_type
         )
-        if open_positions >= int(mode_config.max_positions):
-            return f"entry blocked by {mode_name} learning max positions"
+        use_global_slots = (
+            mode_name == "probe"
+            and bool(self.config.learning_mode.allow_probe_to_use_global_position_slots)
+        ) or (
+            mode_name == "exploration"
+            and bool(self.config.learning_mode.allow_exploration_to_use_global_position_slots)
+        )
+        events = [{**event, "_historical": True} for event in broker.events] + list(extra_events or [])
+        counts = self._learning_cap_counts(
+            events,
+            timestamp=timestamp,
+            signal=signal,
+            decision_type=decision_type,
+        )
+        tags: list[str] = []
+        cap_behavior = "allow"
+        multiplier = 1.0
+        block_reason: str | None = None
+        cap_events: list[dict[str, object]] = []
 
+        if not use_global_slots and int(mode_config.max_positions) > 0 and mode_open_positions >= int(mode_config.max_positions):
+            block_reason = f"entry blocked by {mode_name} learning max positions"
+            cap_behavior = "block"
+            tags.append(f"{mode_name}_positions_cap_hit")
+
+        max_new_trades = int(mode_config.max_new_trades_per_cycle)
+        if block_reason is None and max_new_trades > 0 and counts["cycle_mode_count"] >= max_new_trades:
+            block_reason = f"entry blocked by {mode_name} learning per-cycle cap"
+            cap_behavior = "shadow_only"
+            tags.append("new_trades_per_cycle_learning_cap_hit")
+
+        max_daily = int(mode_config.max_trades_per_day)
+        if max_daily > 0 and counts["mode_count_today"] >= max_daily:
+            tags.append(f"{mode_name}_daily_cap_soft_warning")
+            daily_behavior = self._learning_cap_behavior("daily_cap_behavior")
+            if block_reason is None and daily_behavior in {"shadow_only", "block"}:
+                block_reason = f"entry blocked by {mode_name} learning daily trade cap"
+                cap_behavior = daily_behavior
+            elif cap_behavior == "allow":
+                cap_behavior = "warn_only"
+
+        if (
+            block_reason is None
+            and int(mode_config.max_same_symbol_trades_per_day) > 0
+            and counts["same_symbol_count_today"] >= int(mode_config.max_same_symbol_trades_per_day)
+        ):
+            tags.extend(["same_symbol_learning_cap_hit", "oversampled_symbol"])
+            behavior = self._learning_cap_behavior("same_symbol_cap_behavior")
+            if behavior in {"shadow_only", "block"}:
+                block_reason = "same_symbol_learning_cap_hit"
+                cap_behavior = behavior
+            elif behavior == "reduce_size":
+                multiplier *= self._learning_cap_same_regime_multiplier()
+                cap_behavior = "reduce_size"
+
+        if (
+            block_reason is None
+            and int(mode_config.max_same_entry_mode_trades_per_day) > 0
+            and counts["same_entry_mode_count_today"] >= int(mode_config.max_same_entry_mode_trades_per_day)
+        ):
+            tags.extend(["same_entry_mode_learning_cap_hit", "oversampled_entry_mode"])
+            behavior = self._learning_cap_behavior("same_entry_mode_cap_behavior")
+            if behavior in {"shadow_only", "block"}:
+                block_reason = "same_entry_mode_learning_cap_hit"
+                cap_behavior = behavior
+            elif behavior == "reduce_size":
+                multiplier *= self._learning_cap_same_regime_multiplier()
+                cap_behavior = "reduce_size"
+
+        if (
+            block_reason is None
+            and int(mode_config.max_same_regime_trades_per_day) > 0
+            and counts["same_regime_count_today"] >= int(mode_config.max_same_regime_trades_per_day)
+        ):
+            tags.extend(["same_regime_learning_cap_hit", "oversampled_regime"])
+            behavior = self._learning_cap_behavior("same_regime_cap_behavior")
+            if behavior in {"shadow_only", "block"}:
+                block_reason = "same_regime_learning_cap_hit"
+                cap_behavior = behavior
+            elif behavior == "reduce_size":
+                multiplier *= self._learning_cap_same_regime_multiplier()
+                cap_behavior = "reduce_size"
+
+        adjusted_quantity = max(0, int(quantity_lots))
+        if block_reason is None and multiplier < 1.0:
+            adjusted_quantity = self._quantity_after_multiplier(adjusted_quantity, multiplier)
+            if adjusted_quantity < 1:
+                block_reason = "entry blocked by learning cap reduced size < 1 lot"
+                cap_behavior = "shadow_only"
+
+        metadata = self._learning_cap_metadata(
+            mode_name=mode_name,
+            decision_type=decision_type,
+            counts=counts,
+            mode_open_positions=mode_open_positions,
+            daily_cap_hit=max_daily > 0 and counts["mode_count_today"] >= max_daily,
+            same_symbol_cap_hit="same_symbol_learning_cap_hit" in tags,
+            same_entry_mode_cap_hit="same_entry_mode_learning_cap_hit" in tags,
+            same_regime_cap_hit="same_regime_learning_cap_hit" in tags,
+            cap_behavior=cap_behavior,
+            tags=tags,
+            quantity_lots=quantity_lots,
+            adjusted_quantity_lots=0 if block_reason is not None else adjusted_quantity,
+            size_multiplier=multiplier,
+        )
+        signal = self._signal_with_learning_cap_metadata(signal, metadata)
+        cap_events = self._learning_cap_events(
+            signal,
+            timestamp=timestamp,
+            metadata=metadata,
+            block_reason=block_reason,
+        )
+        if block_reason is not None:
+            return signal, 0, block_reason, cap_events
+        return signal, adjusted_quantity, None, cap_events
+
+    def _learning_cap_counts(
+        self,
+        events: list[dict[str, object]],
+        *,
+        timestamp: datetime,
+        signal,
+        decision_type: str,
+    ) -> dict[str, int]:
         today = timestamp.date()
-        approved_today = 0
-        for event in list(broker.events) + list(extra_events or []):
+        symbol = signal.instrument.symbol
+        entry_mode = self._signal_entry_mode(signal)
+        regime = self._signal_market_regime(signal)
+        counts = {
+            "mode_count_today": 0,
+            "same_symbol_count_today": 0,
+            "same_entry_mode_count_today": 0,
+            "same_regime_count_today": 0,
+            "cycle_mode_count": 0,
+        }
+        for event in events:
             if event.get("action") != "signal" or not bool(event.get("approved")):
                 continue
-            try:
-                event_date = datetime.fromisoformat(str(event.get("timestamp"))).date()
-            except ValueError:
+            event_decision = self._event_policy_decision(event)
+            if event_decision != decision_type:
                 continue
-            if event_date != today:
+            event_timestamp = self._parse_event_timestamp(str(event.get("timestamp", "")), fallback=timestamp)
+            same_day = event_timestamp.date() == today
+            if not same_day:
                 continue
-            metadata = event.get("metadata", {})
-            if not isinstance(metadata, dict):
-                metadata = {}
-            event_decision = str(
-                event.get(
+            counts["mode_count_today"] += 1
+            if str(event.get("symbol", "")) == symbol:
+                counts["same_symbol_count_today"] += 1
+            if self._event_entry_mode(event) == entry_mode:
+                counts["same_entry_mode_count_today"] += 1
+            if self._event_market_regime(event) == regime:
+                counts["same_regime_count_today"] += 1
+            if not bool(event.get("_historical")):
+                counts["cycle_mode_count"] += 1
+        return counts
+
+    @staticmethod
+    def _event_policy_decision(event: dict[str, object]) -> str:
+        metadata = event.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        policy = metadata.get("regime_policy", {})
+        if not isinstance(policy, dict):
+            policy = {}
+        return str(
+            event.get(
+                "actual_policy_decision",
+                metadata.get(
                     "actual_policy_decision",
-                    metadata.get("actual_policy_decision", ""),
-                )
+                    policy.get("actual_policy_decision", policy.get("decision_type", "")),
+                ),
             )
-            if event_decision == decision_type:
-                approved_today += 1
-        if approved_today >= int(mode_config.max_trades_per_day):
-            return f"entry blocked by {mode_name} learning daily trade cap"
-        return None
+        )
+
+    @staticmethod
+    def _event_entry_mode(event: dict[str, object]) -> str:
+        metadata = event.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        policy = metadata.get("regime_policy", {})
+        if not isinstance(policy, dict):
+            policy = {}
+        return str(metadata.get("entry_mode", policy.get("entry_mode", "")))
+
+    @staticmethod
+    def _event_market_regime(event: dict[str, object]) -> str:
+        metadata = event.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        market_regime = metadata.get("market_regime", {})
+        if isinstance(market_regime, dict):
+            return str(market_regime.get("regime", "unknown"))
+        return str(market_regime or "unknown")
+
+    @staticmethod
+    def _signal_entry_mode(signal) -> str:
+        policy = signal.metadata.get("regime_policy", {})
+        if not isinstance(policy, dict):
+            policy = {}
+        return str(signal.metadata.get("entry_mode", policy.get("entry_mode", "")))
+
+    @staticmethod
+    def _signal_market_regime(signal) -> str:
+        market_regime = signal.metadata.get("market_regime", {})
+        if isinstance(market_regime, dict):
+            return str(market_regime.get("regime", "unknown"))
+        return str(market_regime or "unknown")
+
+    def _learning_cap_metadata(
+        self,
+        *,
+        mode_name: str,
+        decision_type: str,
+        counts: dict[str, int],
+        mode_open_positions: int,
+        daily_cap_hit: bool,
+        same_symbol_cap_hit: bool,
+        same_entry_mode_cap_hit: bool,
+        same_regime_cap_hit: bool,
+        cap_behavior: str,
+        tags: list[str],
+        quantity_lots: int,
+        adjusted_quantity_lots: int,
+        size_multiplier: float,
+    ) -> dict[str, object]:
+        return {
+            "mode": mode_name,
+            "decision_type": decision_type,
+            "mode_open_positions": mode_open_positions,
+            "probe_count_today": counts["mode_count_today"] if mode_name == "probe" else 0,
+            "exploration_count_today": (
+                counts["mode_count_today"] if mode_name == "exploration" else 0
+            ),
+            "same_symbol_count_today": counts["same_symbol_count_today"],
+            "same_entry_mode_count_today": counts["same_entry_mode_count_today"],
+            "same_regime_count_today": counts["same_regime_count_today"],
+            "new_trades_this_cycle": counts["cycle_mode_count"],
+            "daily_cap_hit": daily_cap_hit,
+            "same_symbol_cap_hit": same_symbol_cap_hit,
+            "same_entry_mode_cap_hit": same_entry_mode_cap_hit,
+            "same_regime_cap_hit": same_regime_cap_hit,
+            "cap_behavior_applied": cap_behavior,
+            "oversampling_tags": list(tags),
+            "original_quantity_lots": int(quantity_lots),
+            "adjusted_quantity_lots": int(adjusted_quantity_lots),
+            "size_multiplier": round(float(size_multiplier), 4),
+        }
+
+    @staticmethod
+    def _signal_with_learning_cap_metadata(signal, learning_caps: dict[str, object]):
+        metadata = dict(signal.metadata)
+        metadata["learning_caps"] = dict(learning_caps)
+        policy = metadata.get("regime_policy", {})
+        if isinstance(policy, dict):
+            policy = dict(policy)
+            policy["learning_caps"] = dict(learning_caps)
+            policy["oversampling_tags"] = list(learning_caps.get("oversampling_tags", []))
+            metadata["regime_policy"] = policy
+            metadata["regime_policy_audit"] = policy
+        return replace(signal, metadata=metadata)
+
+    @staticmethod
+    def _learning_cap_events(
+        signal,
+        *,
+        timestamp: datetime,
+        metadata: dict[str, object],
+        block_reason: str | None,
+    ) -> list[dict[str, object]]:
+        behavior = str(metadata.get("cap_behavior_applied", "allow"))
+        if behavior == "allow":
+            return []
+        if behavior == "warn_only":
+            action = "learning_cap_warning"
+        elif behavior == "reduce_size":
+            action = "learning_cap_reduce_size"
+        else:
+            action = "learning_cap_shadow_only"
+        return [
+            {
+                "timestamp": timestamp.isoformat(),
+                "symbol": signal.instrument.symbol,
+                "action": action,
+                "reason": block_reason or behavior,
+                "metadata": {"learning_caps": dict(metadata)},
+            }
+        ]
+
+    def _learning_cap_behavior(self, name: str) -> str:
+        value = str(getattr(self.config.learning_caps, name, "warn_only"))
+        if value not in {"warn_only", "shadow_only", "block", "reduce_size"}:
+            return "warn_only"
+        return value
+
+    def _learning_cap_same_regime_multiplier(self) -> float:
+        return max(0.0, min(1.0, float(self.config.learning_caps.same_regime_cap_multiplier)))
 
     @staticmethod
     def _position_policy_mode(position) -> str:

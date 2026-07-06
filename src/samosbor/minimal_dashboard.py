@@ -6,17 +6,26 @@ import json
 import os
 import socket
 import subprocess
+import time
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from threading import Lock
 from urllib.parse import urlparse
 
 from .autonomy.trade_review import trade_review_path
 from .config import load_config
 from .data.tbank import TBankMarketDataProvider
-from .domain import Instrument, InstrumentType
+from .domain import ExitReason, Instrument, InstrumentType
+
+_LIVE_PRICE_CACHE_TTL_SECONDS = 60.0
+_LIVE_PRICE_CACHE_LOCK = Lock()
+_LIVE_PRICE_CACHE: dict[str, object] = {
+    "key": "",
+    "fetched_at": 0.0,
+    "prices": {},
+}
 
 
 def build_minimal_dashboard_payload(config_path: str | Path) -> dict[str, object]:
@@ -32,7 +41,7 @@ def build_minimal_dashboard_payload(config_path: str | Path) -> dict[str, object
     portfolio = dict(state.get("portfolio", {}))
     live_prices, market_data_error = _live_price_marks(config, portfolio)
     positions = _positions_from_state(portfolio, live_prices=live_prices)
-    trades = list(state.get("trades", []))[-10:]
+    trades = _dashboard_trades(list(state.get("trades", []))[-10:])
     closed_trades_count = len(list(state.get("trades", [])))
     events = list(state.get("events", []))[-20:]
     equity = _portfolio_equity(portfolio, positions)
@@ -296,6 +305,8 @@ def _positions_from_state(
         instrument = dict(position.get("instrument", {}))
         lot_size = max(1, int(instrument.get("lot_size", 1)))
         quantity_lots = int(position.get("quantity_lots", 0))
+        if quantity_lots <= 0:
+            continue
         units = quantity_lots * lot_size
         entry = float(position.get("entry_price", 0.0))
         state_current = float(position.get("current_price", entry))
@@ -365,16 +376,43 @@ def _trades_table(rows: list[object]) -> str:
     for item in reversed(rows):
         trade = dict(item)
         pnl = float(trade.get("net_pnl", 0.0))
+        reason = _display_exit_reason(trade, pnl=pnl)
         body += (
             "<tr>"
             f"<td>{_escape(str(trade.get('symbol', '')))}</td>"
             f"<td>{_escape(str(trade.get('direction', '')))}</td>"
             f"<td class=\"{_tone(pnl)}\">{_money(pnl)}</td>"
-            f"<td>{_escape(str(trade.get('reason', '')))}</td>"
+            f"<td>{_escape(reason)}</td>"
             f"<td>{_escape(_fmt_time(str(trade.get('exit_time', ''))))}</td>"
             "</tr>"
         )
     return "<table><tr><th>Symbol</th><th>Dir</th><th>Net</th><th>Exit</th><th>Time</th></tr>" + body + "</table>"
+
+
+def _dashboard_trades(rows: list[object]) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    for item in rows:
+        trade = dict(item)
+        raw_reason = str(trade.get("reason", ""))
+        pnl = float(trade.get("net_pnl", 0.0))
+        display_reason = _display_exit_reason(trade, pnl=pnl)
+        if display_reason != raw_reason:
+            trade["raw_reason"] = raw_reason
+            trade["reason"] = display_reason
+        result.append(trade)
+    return result
+
+
+def _display_exit_reason(trade: dict[str, object], *, pnl: float | None = None) -> str:
+    reason = str(trade.get("reason", ""))
+    if reason != ExitReason.STOP_LOSS.value:
+        return reason
+    net_pnl = float(trade.get("net_pnl", 0.0) if pnl is None else pnl)
+    if net_pnl > 0:
+        return ExitReason.PROFIT_PROTECT_STOP.value
+    if net_pnl == 0:
+        return ExitReason.BREAKEVEN_STOP.value
+    return reason
 
 
 def _cycle_table(cycle: dict[str, object]) -> str:
@@ -530,11 +568,42 @@ def _live_price_marks(config, portfolio: dict[str, object]) -> tuple[dict[str, f
     instruments = _position_instruments(portfolio)
     if not instruments:
         return {}, ""
+    cache_key = _live_price_cache_key(instruments)
+    now = time.monotonic()
+    with _LIVE_PRICE_CACHE_LOCK:
+        cached_prices = dict(_LIVE_PRICE_CACHE.get("prices", {}))
+        cached_at = float(_LIVE_PRICE_CACHE.get("fetched_at", 0.0) or 0.0)
+        if (
+            _LIVE_PRICE_CACHE.get("key") == cache_key
+            and cached_prices
+            and now - cached_at <= _LIVE_PRICE_CACHE_TTL_SECONDS
+        ):
+            return cached_prices, ""
     try:
         prices = TBankMarketDataProvider(config).get_last_prices(instruments)
     except Exception as exc:  # pragma: no cover - depends on live broker API
+        with _LIVE_PRICE_CACHE_LOCK:
+            cached_prices = dict(_LIVE_PRICE_CACHE.get("prices", {}))
+            if _LIVE_PRICE_CACHE.get("key") == cache_key and cached_prices:
+                return cached_prices, f"{type(exc).__name__}: {exc}"
         return {}, f"{type(exc).__name__}: {exc}"
-    return {symbol: price for symbol, price in prices.items() if price > 0}, ""
+    live_prices = {symbol: price for symbol, price in prices.items() if price > 0}
+    with _LIVE_PRICE_CACHE_LOCK:
+        _LIVE_PRICE_CACHE.update(
+            {
+                "key": cache_key,
+                "fetched_at": now,
+                "prices": dict(live_prices),
+            }
+        )
+    return live_prices, ""
+
+
+def _live_price_cache_key(instruments: list[Instrument]) -> str:
+    return "|".join(
+        f"{instrument.symbol}:{instrument.figi}:{instrument.uid}:{instrument.lot_size}"
+        for instrument in instruments
+    )
 
 
 def _position_instruments(portfolio: dict[str, object]) -> list[Instrument]:
@@ -542,6 +611,8 @@ def _position_instruments(portfolio: dict[str, object]) -> list[Instrument]:
     positions = dict(portfolio.get("positions", {}))
     for symbol, raw_position in sorted(positions.items()):
         position = dict(raw_position)
+        if int(position.get("quantity_lots", 0)) <= 0:
+            continue
         raw_instrument = dict(position.get("instrument", {}))
         try:
             instrument_type = InstrumentType(str(raw_instrument.get("instrument_type", "stock")))

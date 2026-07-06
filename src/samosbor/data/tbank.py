@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 import time
 import warnings
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from pathlib import Path
+from threading import Lock
 from typing import Any, Iterator
 
 from ..config import AppConfig, read_secret_from_env_or_file
 from ..domain import Candle, Instrument, InstrumentType
 
 LOGGER = logging.getLogger(__name__)
+_REQUEST_PACE_LOCK = Lock()
+_DEFAULT_MIN_REQUEST_INTERVAL_SECONDS = 0.5
+_RATE_LIMIT_LOCK_STALE_SECONDS = 30.0
 
 
 class TBankDependencyError(RuntimeError):
@@ -240,20 +246,23 @@ class TBankMarketDataProvider:
         if to_dt is None:
             to_dt = now_fn()
 
+        candle_source = _tbank_candle_source(self.config.data.tbank_candle_source)
+        response_items: list[Any] = []
         with self._client() as client:
-            response = self._call_with_retries(
-                lambda: list(
-                    client.get_all_candles(
+            for chunk_from, chunk_to in _candle_request_ranges(from_dt, to_dt, timeframe):
+                response = self._call_with_retries(
+                    lambda chunk_from=chunk_from, chunk_to=chunk_to: client.market_data.get_candles(
                         instrument_id=instrument.instrument_id,
-                        from_=from_dt,
-                        to=to_dt,
+                        from_=chunk_from,
+                        to=chunk_to,
                         interval=interval,
-                        candle_source_type=_tbank_candle_source(self.config.data.tbank_candle_source),
-                    )
-                ),
-                context=f"get_all_candles:{instrument.symbol}",
-            )
+                        candle_source_type=candle_source,
+                    ).candles,
+                    context=f"get_candles:{instrument.symbol}:{chunk_from.isoformat()}",
+                )
+                response_items.extend(list(response))
 
+        unique_items = {item.time: item for item in response_items}
         candles = [
             Candle(
                 timestamp=item.time,
@@ -263,7 +272,7 @@ class TBankMarketDataProvider:
                 close=float(quotation_to_decimal(item.close)),
                 volume=float(item.volume),
             )
-            for item in response
+            for item in unique_items.values()
         ]
         candles = sorted(candles, key=lambda candle: candle.timestamp)
         return drop_incomplete_trailing_candle(candles, timeframe=timeframe, as_of=to_dt)
@@ -289,7 +298,11 @@ class TBankMarketDataProvider:
             instrument.symbol: self.get_candles(
                 instrument,
                 timeframe=timeframe,
-                history_days=self.config.data.history_days,
+                history_days=_secondary_timeframe_history_days(
+                    primary_timeframe=self.config.data.timeframe,
+                    secondary_timeframe=timeframe,
+                    configured_days=self.config.data.history_days,
+                ),
             )
             for instrument in resolved
         }
@@ -344,6 +357,7 @@ class TBankMarketDataProvider:
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
+                _pace_tbank_request()
                 return action()
             except Exception as exc:  # pragma: no cover - depends on live API failures
                 last_error = exc
@@ -361,6 +375,137 @@ class TBankMarketDataProvider:
                 time.sleep(retry_wait)
         assert last_error is not None
         raise last_error
+
+
+def _candle_request_ranges(from_dt: datetime, to_dt: datetime, timeframe: str) -> list[tuple[datetime, datetime]]:
+    if to_dt <= from_dt:
+        return []
+    step = _candle_request_window(timeframe)
+    ranges: list[tuple[datetime, datetime]] = []
+    current = from_dt
+    while current < to_dt:
+        chunk_to = min(current + step, to_dt)
+        ranges.append((current, chunk_to))
+        current = chunk_to
+    return ranges
+
+
+def _candle_request_window(timeframe: str) -> timedelta:
+    normalized = timeframe.lower()
+    if normalized in {"1min", "5min", "10min", "15min", "30min"}:
+        return timedelta(days=1)
+    if normalized == "hour":
+        return timedelta(days=7)
+    if normalized == "day":
+        return timedelta(days=365)
+    return timeframe_to_duration(timeframe)
+
+
+def _secondary_timeframe_history_days(
+    *,
+    primary_timeframe: str,
+    secondary_timeframe: str,
+    configured_days: int,
+) -> int:
+    configured_days = max(1, int(configured_days or 1))
+    if timeframe_to_duration(secondary_timeframe) < timeframe_to_duration(primary_timeframe):
+        return min(configured_days, 4)
+    return configured_days
+
+
+def _pace_tbank_request() -> None:
+    min_interval = _min_request_interval_seconds()
+    if min_interval <= 0:
+        return
+    with _REQUEST_PACE_LOCK:
+        _pace_tbank_request_across_processes(min_interval)
+
+
+def _min_request_interval_seconds() -> float:
+    raw_value = os.environ.get("SAMOSBOR_TBANK_MIN_REQUEST_INTERVAL_SEC", "")
+    if not raw_value:
+        return _DEFAULT_MIN_REQUEST_INTERVAL_SECONDS
+    try:
+        return max(0.0, float(raw_value))
+    except ValueError:
+        return _DEFAULT_MIN_REQUEST_INTERVAL_SECONDS
+
+
+def _pace_tbank_request_across_processes(min_interval: float) -> None:
+    state_path = _rate_limit_state_path()
+    lock_dir = _rate_limit_lock_dir(state_path)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    _acquire_rate_limit_lock(lock_dir)
+    try:
+        now = time.time()
+        last_request_at = _read_rate_limit_timestamp(state_path)
+        if last_request_at is not None and last_request_at <= now + _RATE_LIMIT_LOCK_STALE_SECONDS:
+            wait_seconds = min_interval - (now - last_request_at)
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+        state_path.write_text(f"{time.time():.9f}", encoding="ascii")
+    finally:
+        _release_rate_limit_lock(lock_dir)
+
+
+def _rate_limit_state_path() -> Path:
+    raw_path = os.environ.get("SAMOSBOR_TBANK_RATE_LIMIT_PATH", "")
+    if raw_path:
+        return Path(raw_path).expanduser()
+    return Path(tempfile.gettempdir()) / "samosbor_tbank_rate_limit.state"
+
+
+def _rate_limit_lock_dir(state_path: Path) -> Path:
+    return state_path.with_name(f"{state_path.name}.lock")
+
+
+def _read_rate_limit_timestamp(state_path: Path) -> float | None:
+    try:
+        raw_value = state_path.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _acquire_rate_limit_lock(lock_dir: Path) -> None:
+    deadline = time.monotonic() + _RATE_LIMIT_LOCK_STALE_SECONDS
+    while True:
+        try:
+            os.mkdir(lock_dir)
+            return
+        except FileExistsError:
+            _remove_stale_rate_limit_lock(lock_dir)
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"T-Bank rate-limit lock is busy: {lock_dir}")
+            time.sleep(0.05)
+
+
+def _remove_stale_rate_limit_lock(lock_dir: Path) -> None:
+    try:
+        age = time.time() - lock_dir.stat().st_mtime
+    except OSError:
+        return
+    if age < _RATE_LIMIT_LOCK_STALE_SECONDS:
+        return
+    try:
+        os.rmdir(lock_dir)
+    except OSError:
+        return
+
+
+def _release_rate_limit_lock(lock_dir: Path) -> None:
+    try:
+        os.rmdir(lock_dir)
+    except OSError:
+        return
 
 
 def _retry_wait_seconds(exc: Exception) -> float:

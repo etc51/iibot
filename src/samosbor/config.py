@@ -138,6 +138,10 @@ class LearningModeSection:
     choppy_trend_short_probe_min_signal_strength: float = 0.45
     choppy_trend_short_default_mode: str = "wait_pullback"
     allow_range_chop_exploration: bool = True
+    allow_probe_to_use_global_position_slots: bool = True
+    allow_exploration_to_use_global_position_slots: bool = True
+    do_not_block_probe_due_to_daily_limit_unless_extreme: bool = True
+    do_not_block_exploration_due_to_daily_limit_unless_extreme: bool = True
 
 
 @dataclass(frozen=True)
@@ -145,6 +149,19 @@ class ModeRiskSection:
     risk_multiplier: float = 1.0
     max_positions: int = 0
     max_trades_per_day: int = 0
+    max_new_trades_per_cycle: int = 0
+    max_same_symbol_trades_per_day: int = 0
+    max_same_entry_mode_trades_per_day: int = 0
+    max_same_regime_trades_per_day: int = 0
+
+
+@dataclass(frozen=True)
+class LearningCapsSection:
+    daily_cap_behavior: str = "warn_only"
+    same_symbol_cap_behavior: str = "shadow_only"
+    same_entry_mode_cap_behavior: str = "shadow_only"
+    same_regime_cap_behavior: str = "reduce_size"
+    same_regime_cap_multiplier: float = 0.50
 
 
 @dataclass(frozen=True)
@@ -153,15 +170,23 @@ class LearningRiskSection:
     probe: ModeRiskSection = field(
         default_factory=lambda: ModeRiskSection(
             risk_multiplier=0.25,
-            max_positions=6,
-            max_trades_per_day=10,
+            max_positions=12,
+            max_trades_per_day=40,
+            max_new_trades_per_cycle=6,
+            max_same_symbol_trades_per_day=3,
+            max_same_entry_mode_trades_per_day=15,
+            max_same_regime_trades_per_day=25,
         )
     )
     exploration: ModeRiskSection = field(
         default_factory=lambda: ModeRiskSection(
             risk_multiplier=0.10,
-            max_positions=4,
-            max_trades_per_day=8,
+            max_positions=12,
+            max_trades_per_day=40,
+            max_new_trades_per_cycle=6,
+            max_same_symbol_trades_per_day=2,
+            max_same_entry_mode_trades_per_day=15,
+            max_same_regime_trades_per_day=25,
         )
     )
 
@@ -250,12 +275,121 @@ class Confirmation5mPolicySection:
 
 
 @dataclass(frozen=True)
+class WeakDownChoppyShortConfirmationSection:
+    aligned_5m_mode: str = "probe"
+    neutral_5m_mode: str = "probe"
+    mild_rebound_5m_mode: str = "exploration_or_wait_addon"
+    strong_rebound_5m_mode: str = "wait_pullback_only"
+    extreme_adverse_5m_mode: str = "shadow_or_reject"
+
+
+@dataclass(frozen=True)
+class WeakDownChoppyRegimePolicySection:
+    enable_probe_now_with_pending_addon: bool = True
+    short_direct_probe_enabled: bool = True
+    short_direct_exploration_enabled: bool = True
+    short_direct_probe_min_signal_strength: float = 0.20
+    short_direct_exploration_min_signal_strength: float = 0.12
+    short_direct_probe_max_soft_issues: int = 4
+    short_direct_probe_multiplier: float = 0.25
+    short_direct_exploration_multiplier: float = 0.10
+    create_pullback_addon_after_direct_probe: bool = True
+    pullback_addon_multiplier: float = 0.15
+    strict_policy_keeps_wait_pullback: bool = True
+    short_confirmation: WeakDownChoppyShortConfirmationSection = field(
+        default_factory=WeakDownChoppyShortConfirmationSection
+    )
+    long: WeakDownChoppyLongPolicySection = field(default_factory=lambda: WeakDownChoppyLongPolicySection())
+
+
+@dataclass(frozen=True)
+class CleanUptrendLongPolicySection:
+    allow_direct_trend_long: bool = True
+    long_direct_probe_min_signal_strength: float = 0.20
+    long_direct_normal_min_signal_strength: float = 0.35
+    long_probe_multiplier: float = 0.15
+    long_normal_multiplier: float = 0.25
+
+
+@dataclass(frozen=True)
+class MixedLongPolicySection:
+    allow_long_probe: bool = True
+    allow_long_exploration: bool = True
+    long_probe_multiplier: float = 0.10
+    long_exploration_multiplier: float = 0.05
+    require_5m_aligned_or_recovery: bool = True
+
+
+@dataclass(frozen=True)
+class RangeChopLongPolicySection:
+    allow_mean_reversion_long_exploration: bool = True
+    long_exploration_multiplier: float = 0.05
+    require_failed_breakdown_or_reclaim: bool = True
+
+
+@dataclass(frozen=True)
+class WeakDownChoppyLongPolicySection:
+    allow_normal_long: bool = False
+    allow_rebound_probe_long: bool = True
+    allow_rebound_exploration_long: bool = True
+    long_probe_multiplier: float = 0.05
+    long_exploration_multiplier: float = 0.03
+    require_strong_rebound_or_failed_breakdown: bool = True
+    default_long_mode: str = "shadow_only"
+
+
+@dataclass(frozen=True)
+class MarketSelloffLongPolicySection:
+    allow_normal_long: bool = False
+    allow_capitulation_bounce_probe: bool = True
+    capitulation_bounce_probe_multiplier: float = 0.03
+    default_long_mode: str = "shadow_or_tiny_probe"
+    require_reclaim_confirmation: bool = True
+
+
+@dataclass(frozen=True)
+class LongRegimePolicySection:
+    long: object
+
+
+@dataclass(frozen=True)
+class CleanUptrendRegimePolicySection:
+    long: CleanUptrendLongPolicySection = field(default_factory=CleanUptrendLongPolicySection)
+
+
+@dataclass(frozen=True)
+class MixedRegimePolicySection:
+    long: MixedLongPolicySection = field(default_factory=MixedLongPolicySection)
+
+
+@dataclass(frozen=True)
+class RangeChopRegimePolicySection:
+    long: RangeChopLongPolicySection = field(default_factory=RangeChopLongPolicySection)
+
+
+@dataclass(frozen=True)
+class RegimePolicySection:
+    weak_down_choppy: WeakDownChoppyRegimePolicySection = field(
+        default_factory=WeakDownChoppyRegimePolicySection
+    )
+    clean_uptrend: CleanUptrendRegimePolicySection = field(default_factory=CleanUptrendRegimePolicySection)
+    mixed: MixedRegimePolicySection = field(default_factory=MixedRegimePolicySection)
+    range_chop: RangeChopRegimePolicySection = field(default_factory=RangeChopRegimePolicySection)
+
+
+@dataclass(frozen=True)
 class LongSidePolicySection:
-    normal_enabled: bool = False
+    normal_enabled: bool = True
+    normal_only_in_regimes: list[str] = field(default_factory=lambda: ["clean_uptrend"])
     probe_enabled: bool = True
     exploration_enabled: bool = True
     probe_risk_multiplier: float = 0.10
+    exploration_risk_multiplier: float = 0.05
     max_probe_trades_per_day: int = 3
+    max_long_probe_trades_per_day: int = 10
+    max_long_exploration_trades_per_day: int = 10
+    max_same_symbol_long_trades_per_day: int = 2
+    full_size_long_requires_clean_uptrend: bool = True
 
 
 @dataclass(frozen=True)
@@ -291,6 +425,36 @@ class SymbolHealthPolicySection:
             observe_only=True,
         )
     )
+
+
+@dataclass(frozen=True)
+class MarketSelloffBasketSection:
+    enabled: bool = True
+    max_new_shorts_per_cycle: int = 8
+    max_selloff_positions: int = 10
+    per_symbol_risk_multiplier: float = 0.15
+    max_total_selloff_risk: float = 0.015
+    prefer_liquid_symbols: bool = True
+    min_symbols_to_trade: int = 2
+    max_symbols_to_trade: int = 10
+
+
+@dataclass(frozen=True)
+class MarketSelloffLearningCapsSection:
+    max_same_symbol_selloff_trades_per_day: int = 2
+    max_same_entry_mode_selloff_trades_per_day: int = 20
+    max_same_regime_selloff_trades_per_day: int = 35
+    max_new_selloff_trades_per_cycle: int = 8
+    daily_cap_behavior: str = "warn_only"
+    same_symbol_cap_behavior: str = "shadow_only"
+    same_entry_mode_cap_behavior: str = "reduce_size"
+
+
+@dataclass(frozen=True)
+class MarketSelloffImpulseSection:
+    basket: MarketSelloffBasketSection = field(default_factory=MarketSelloffBasketSection)
+    learning_caps: MarketSelloffLearningCapsSection = field(default_factory=MarketSelloffLearningCapsSection)
+    long: MarketSelloffLongPolicySection = field(default_factory=MarketSelloffLongPolicySection)
 
 
 @dataclass(frozen=True)
@@ -361,12 +525,15 @@ class AppConfig:
     research: ResearchSection
     learning_mode: LearningModeSection = field(default_factory=LearningModeSection)
     learning_risk: LearningRiskSection = field(default_factory=LearningRiskSection)
+    learning_caps: LearningCapsSection = field(default_factory=LearningCapsSection)
     learning_signals: LearningSignalsSection = field(default_factory=LearningSignalsSection)
     learning_microstructure: LearningMicrostructureSection = field(default_factory=LearningMicrostructureSection)
     ml_learning_policy: MlLearningPolicySection = field(default_factory=MlLearningPolicySection)
     confirmation_5m: Confirmation5mPolicySection = field(default_factory=Confirmation5mPolicySection)
+    regime_policy: RegimePolicySection = field(default_factory=RegimePolicySection)
     side_policy: SidePolicySection = field(default_factory=SidePolicySection)
     symbol_health_policy: SymbolHealthPolicySection = field(default_factory=SymbolHealthPolicySection)
+    market_selloff_impulse: MarketSelloffImpulseSection = field(default_factory=MarketSelloffImpulseSection)
 
     def resolve_path(self, value: str) -> Path:
         path = Path(value)
@@ -419,6 +586,45 @@ def _parse_mode_risk(payload: dict[str, Any] | None, default: ModeRiskSection) -
     return ModeRiskSection(**values)
 
 
+def _learning_risk_payload(
+    learning_risk_raw: dict[str, Any] | None,
+    risk_raw: dict[str, Any] | None,
+    mode: str,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if isinstance(risk_raw, dict) and isinstance(risk_raw.get(mode), dict):
+        payload.update(risk_raw[mode])
+    if isinstance(learning_risk_raw, dict) and isinstance(learning_risk_raw.get(mode), dict):
+        payload.update(learning_risk_raw[mode])
+    aliases = {
+        f"max_{mode}_positions": "max_positions",
+        f"max_{mode}_trades_per_day": "max_trades_per_day",
+    }
+    for source in (risk_raw, learning_risk_raw):
+        if not isinstance(source, dict):
+            continue
+        for old_name, new_name in aliases.items():
+            if old_name in source and new_name not in payload and _legacy_cap_can_expand_default(
+                mode,
+                new_name,
+                source[old_name],
+            ):
+                payload[new_name] = source[old_name]
+    return payload
+
+
+def _legacy_cap_can_expand_default(mode: str, field_name: str, value: object) -> bool:
+    default_mode = getattr(LearningRiskSection(), mode, None)
+    if default_mode is None:
+        return False
+    try:
+        configured = float(value)
+        default_value = float(getattr(default_mode, field_name))
+    except (TypeError, ValueError):
+        return False
+    return configured > default_value
+
+
 def _parse_mode_signal(payload: dict[str, Any] | None, default: ModeSignalSection) -> ModeSignalSection:
     values = {**default.__dict__, **_dataclass_payload(ModeSignalSection, payload)}
     return ModeSignalSection(**values)
@@ -430,6 +636,46 @@ def _parse_mode_microstructure(
 ) -> ModeMicrostructureSection:
     values = {**default.__dict__, **_dataclass_payload(ModeMicrostructureSection, payload)}
     return ModeMicrostructureSection(**values)
+
+
+def _parse_weak_down_choppy_policy(payload: dict[str, Any] | None) -> WeakDownChoppyRegimePolicySection:
+    default = WeakDownChoppyRegimePolicySection()
+    raw = payload if isinstance(payload, dict) else {}
+    short_confirmation = WeakDownChoppyShortConfirmationSection(
+        **{
+            **default.short_confirmation.__dict__,
+            **_dataclass_payload(
+                WeakDownChoppyShortConfirmationSection,
+                raw.get("short_confirmation", {}) if isinstance(raw.get("short_confirmation"), dict) else {},
+            ),
+        }
+    )
+    long_policy = WeakDownChoppyLongPolicySection(
+        **{
+            **default.long.__dict__,
+            **_dataclass_payload(
+                WeakDownChoppyLongPolicySection,
+                raw.get("long", {}) if isinstance(raw.get("long"), dict) else {},
+            ),
+        }
+    )
+    values = {
+        **default.__dict__,
+        **_dataclass_payload(WeakDownChoppyRegimePolicySection, raw),
+        "short_confirmation": short_confirmation,
+        "long": long_policy,
+    }
+    return WeakDownChoppyRegimePolicySection(**values)
+
+
+def _parse_regime_long_policy(
+    payload: dict[str, Any] | None,
+    cls: type,
+    default: object,
+) -> object:
+    raw = payload if isinstance(payload, dict) else {}
+    long_raw = raw.get("long", {}) if isinstance(raw.get("long"), dict) else {}
+    return cls(**{**default.__dict__, **_dataclass_payload(cls, long_raw)})
 
 
 def load_config(config_path: str | Path) -> AppConfig:
@@ -459,24 +705,38 @@ def load_config(config_path: str | Path) -> AppConfig:
     risk_raw = raw.get("risk", {})
     risk = RiskSection(**_dataclass_payload(RiskSection, risk_raw))
 
-    learning_mode = LearningModeSection(
-        **_dataclass_payload(LearningModeSection, raw.get("learning_mode", {}))
-    )
+    learning_mode_raw: dict[str, Any] = {}
+    if isinstance(risk_raw.get("learning_mode"), dict):
+        learning_mode_raw.update(risk_raw["learning_mode"])
+    if isinstance(raw.get("learning_mode"), dict):
+        learning_mode_raw.update(raw["learning_mode"])
+    learning_mode = LearningModeSection(**_dataclass_payload(LearningModeSection, learning_mode_raw))
     default_learning_risk = LearningRiskSection()
     learning_risk_raw = raw.get("learning_risk", {})
     learning_risk = LearningRiskSection(
         normal=_parse_mode_risk(
-            learning_risk_raw.get("normal", {}) if isinstance(learning_risk_raw, dict) else {},
+            _learning_risk_payload(learning_risk_raw, risk_raw, "normal"),
             default_learning_risk.normal,
         ),
         probe=_parse_mode_risk(
-            learning_risk_raw.get("probe", {}) if isinstance(learning_risk_raw, dict) else {},
+            _learning_risk_payload(learning_risk_raw, risk_raw, "probe"),
             default_learning_risk.probe,
         ),
         exploration=_parse_mode_risk(
-            learning_risk_raw.get("exploration", {}) if isinstance(learning_risk_raw, dict) else {},
+            _learning_risk_payload(learning_risk_raw, risk_raw, "exploration"),
             default_learning_risk.exploration,
         ),
+    )
+    learning_caps_raw: dict[str, Any] = {}
+    if isinstance(risk_raw.get("learning_caps"), dict):
+        learning_caps_raw.update(risk_raw["learning_caps"])
+    if isinstance(raw.get("learning_caps"), dict):
+        learning_caps_raw.update(raw["learning_caps"])
+    learning_caps = LearningCapsSection(
+        **{
+            **LearningCapsSection().__dict__,
+            **_dataclass_payload(LearningCapsSection, learning_caps_raw),
+        }
     )
     signals_raw = raw.get("signals", {})
     default_learning_signals = LearningSignalsSection()
@@ -525,6 +785,42 @@ def load_config(config_path: str | Path) -> AppConfig:
             )
         )
     )
+    regime_policy_raw = raw.get("regime_policy", {})
+    regime_policy_raw = regime_policy_raw if isinstance(regime_policy_raw, dict) else {}
+    regime_policy = RegimePolicySection(
+        weak_down_choppy=_parse_weak_down_choppy_policy(
+            regime_policy_raw.get("weak_down_choppy", {})
+            if isinstance(regime_policy_raw.get("weak_down_choppy"), dict)
+            else {}
+        ),
+        clean_uptrend=CleanUptrendRegimePolicySection(
+            long=_parse_regime_long_policy(
+                regime_policy_raw.get("clean_uptrend", {})
+                if isinstance(regime_policy_raw.get("clean_uptrend"), dict)
+                else {},
+                CleanUptrendLongPolicySection,
+                CleanUptrendLongPolicySection(),
+            )
+        ),
+        mixed=MixedRegimePolicySection(
+            long=_parse_regime_long_policy(
+                regime_policy_raw.get("mixed", {})
+                if isinstance(regime_policy_raw.get("mixed"), dict)
+                else {},
+                MixedLongPolicySection,
+                MixedLongPolicySection(),
+            )
+        ),
+        range_chop=RangeChopRegimePolicySection(
+            long=_parse_regime_long_policy(
+                regime_policy_raw.get("range_chop", {})
+                if isinstance(regime_policy_raw.get("range_chop"), dict)
+                else {},
+                RangeChopLongPolicySection,
+                RangeChopLongPolicySection(),
+            )
+        ),
+    )
     symbol_health_raw = raw.get("symbol_health", {})
     default_symbol_health = SymbolHealthPolicySection()
     symbol_health_policy = SymbolHealthPolicySection(
@@ -556,6 +852,37 @@ def load_config(config_path: str | Path) -> AppConfig:
             }
         ),
     )
+    selloff_raw = raw.get("market_selloff_impulse", {})
+    default_selloff = MarketSelloffImpulseSection()
+    market_selloff_impulse = MarketSelloffImpulseSection(
+        basket=MarketSelloffBasketSection(
+            **{
+                **default_selloff.basket.__dict__,
+                **_dataclass_payload(
+                    MarketSelloffBasketSection,
+                    selloff_raw.get("basket", {}) if isinstance(selloff_raw, dict) else {},
+                ),
+            }
+        ),
+        learning_caps=MarketSelloffLearningCapsSection(
+            **{
+                **default_selloff.learning_caps.__dict__,
+                **_dataclass_payload(
+                    MarketSelloffLearningCapsSection,
+                    selloff_raw.get("learning_caps", {}) if isinstance(selloff_raw, dict) else {},
+                ),
+            }
+        ),
+        long=MarketSelloffLongPolicySection(
+            **{
+                **default_selloff.long.__dict__,
+                **_dataclass_payload(
+                    MarketSelloffLongPolicySection,
+                    selloff_raw.get("long", {}) if isinstance(selloff_raw, dict) else {},
+                ),
+            }
+        ),
+    )
 
     execution_raw = raw.get("execution", {})
     execution = ExecutionSection(
@@ -579,12 +906,15 @@ def load_config(config_path: str | Path) -> AppConfig:
         risk=risk,
         learning_mode=learning_mode,
         learning_risk=learning_risk,
+        learning_caps=learning_caps,
         learning_signals=learning_signals,
         learning_microstructure=learning_microstructure,
         ml_learning_policy=ml_learning_policy,
         confirmation_5m=confirmation_5m,
+        regime_policy=regime_policy,
         side_policy=side_policy,
         symbol_health_policy=symbol_health_policy,
+        market_selloff_impulse=market_selloff_impulse,
         execution=execution,
         backtest=backtest,
         reporting=reporting,
