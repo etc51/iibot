@@ -373,8 +373,8 @@ target_gross_exposure = 1.00
 max_gross_exposure = 1.00
 max_positions = 20
 max_new_shorts_per_cycle = 20
-per_symbol_exposure_target = 0.08
-per_symbol_exposure_max = 0.12
+per_symbol_exposure_target = 0.12
+per_symbol_exposure_max = 0.18
 
 [short_only.edge]
 min_expected_net_edge_rub = 5.0
@@ -393,8 +393,8 @@ target_gross_exposure = 1.00
 max_gross_exposure = 1.25
 max_positions = 20
 max_new_shorts_per_cycle = 20
-per_symbol_exposure_target = 0.08
-per_symbol_exposure_max = 0.12
+per_symbol_exposure_target = 0.12
+per_symbol_exposure_max = 0.18
 max_risk_quantity_expansion = 3.0
 
 [short_only.sizing.clean_downtrend]
@@ -402,8 +402,8 @@ target_gross_exposure = 1.00
 max_gross_exposure = 1.00
 max_positions = 20
 max_new_shorts_per_cycle = 20
-per_symbol_exposure_target = 0.08
-per_symbol_exposure_max = 0.12
+per_symbol_exposure_target = 0.12
+per_symbol_exposure_max = 0.18
 max_risk_quantity_expansion = 3.0
 
 [short_only.sizing.weak_down_choppy]
@@ -411,8 +411,8 @@ target_gross_exposure = 1.00
 max_gross_exposure = 1.00
 max_positions = 20
 max_new_shorts_per_cycle = 20
-per_symbol_exposure_target = 0.08
-per_symbol_exposure_max = 0.12
+per_symbol_exposure_target = 0.12
+per_symbol_exposure_max = 0.18
 max_risk_quantity_expansion = 3.0
 
 [short_only.sizing.mixed_bearish]
@@ -420,8 +420,8 @@ target_gross_exposure = 1.00
 max_gross_exposure = 1.00
 max_positions = 20
 max_new_shorts_per_cycle = 20
-per_symbol_exposure_target = 0.08
-per_symbol_exposure_max = 0.12
+per_symbol_exposure_target = 0.12
+per_symbol_exposure_max = 0.18
 max_risk_quantity_expansion = 3.0
 
 [short_only.sizing.range_chop]
@@ -585,8 +585,8 @@ enabled = true
 max_new_shorts_per_cycle = 20
 max_selloff_positions = 20
 per_symbol_risk_multiplier = 0.15
-per_symbol_exposure_target = 0.08
-per_symbol_exposure_max = 0.12
+per_symbol_exposure_target = 0.12
+per_symbol_exposure_max = 0.18
 max_total_selloff_gross_exposure = 1.00
 max_total_selloff_risk = 0.03
 prefer_liquid_symbols = true

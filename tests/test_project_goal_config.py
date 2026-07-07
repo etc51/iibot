@@ -76,14 +76,20 @@ def test_focused_runtime_matches_project_goal():
     assert config.short_only.sizing.market_selloff_impulse.target_gross_exposure == 1.00
     assert config.short_only.sizing.market_selloff_impulse.max_positions == 20
     assert config.short_only.sizing.market_selloff_impulse.max_new_shorts_per_cycle == 20
+    assert config.short_only.sizing.market_selloff_impulse.per_symbol_exposure_target == 0.12
+    assert config.short_only.sizing.market_selloff_impulse.per_symbol_exposure_max == 0.18
     assert config.short_only.sizing.clean_downtrend.target_gross_exposure == 1.00
     assert config.short_only.sizing.clean_downtrend.max_positions == 20
     assert config.short_only.sizing.weak_down_choppy.target_gross_exposure == 1.00
     assert config.short_only.sizing.weak_down_choppy.max_positions == 20
+    assert config.short_only.sizing.weak_down_choppy.per_symbol_exposure_target == 0.12
+    assert config.short_only.sizing.weak_down_choppy.per_symbol_exposure_max == 0.18
     assert config.short_only.sizing.mixed_bearish.target_gross_exposure == 1.00
     assert config.short_only.sizing.mixed_bearish.max_positions == 20
     assert config.short_only.mixed_bearish_override.target_gross_exposure == 1.00
     assert config.short_only.mixed_bearish_override.max_positions == 20
+    assert config.short_only.mixed_bearish_override.per_symbol_exposure_target == 0.12
+    assert config.short_only.mixed_bearish_override.per_symbol_exposure_max == 0.18
     assert config.short_only.microstructure.hard_max_spread_bps == 40.0
     assert config.short_only.confirmation.strong_rebound_action == "reduce_size"
     assert config.short_only.exits.early_loss_guard_enabled is True
@@ -106,7 +112,8 @@ def test_focused_runtime_matches_project_goal():
     assert config.market_selloff_impulse.basket.max_new_shorts_per_cycle == 20
     assert config.market_selloff_impulse.basket.max_selloff_positions == 20
     assert config.market_selloff_impulse.basket.per_symbol_risk_multiplier == 0.15
-    assert config.market_selloff_impulse.basket.per_symbol_exposure_target == 0.08
+    assert config.market_selloff_impulse.basket.per_symbol_exposure_target == 0.12
+    assert config.market_selloff_impulse.basket.per_symbol_exposure_max == 0.18
     assert config.market_selloff_impulse.basket.max_total_selloff_gross_exposure == 1.00
     assert config.market_selloff_impulse.basket.max_total_selloff_risk == 0.03
     assert config.market_selloff_impulse.basket.min_symbols_to_trade == 4

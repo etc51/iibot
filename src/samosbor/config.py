@@ -450,8 +450,8 @@ class MarketSelloffBasketSection:
     max_new_shorts_per_cycle: int = 20
     max_selloff_positions: int = 20
     per_symbol_risk_multiplier: float = 0.15
-    per_symbol_exposure_target: float = 0.08
-    per_symbol_exposure_max: float = 0.12
+    per_symbol_exposure_target: float = 0.12
+    per_symbol_exposure_max: float = 0.18
     max_total_selloff_gross_exposure: float = 1.00
     max_total_selloff_risk: float = 0.03
     prefer_liquid_symbols: bool = True
@@ -548,8 +548,8 @@ class ShortOnlyMixedBearishOverrideSection:
     max_gross_exposure: float = 1.00
     max_positions: int = 20
     max_new_shorts_per_cycle: int = 20
-    per_symbol_exposure_target: float = 0.08
-    per_symbol_exposure_max: float = 0.12
+    per_symbol_exposure_target: float = 0.12
+    per_symbol_exposure_max: float = 0.18
 
 
 @dataclass(frozen=True)
@@ -560,8 +560,8 @@ class ShortOnlySizingSection:
             max_gross_exposure=1.25,
             max_positions=20,
             max_new_shorts_per_cycle=20,
-            per_symbol_exposure_target=0.08,
-            per_symbol_exposure_max=0.12,
+            per_symbol_exposure_target=0.12,
+            per_symbol_exposure_max=0.18,
             max_risk_quantity_expansion=3.0,
         )
     )
@@ -571,8 +571,8 @@ class ShortOnlySizingSection:
             max_gross_exposure=1.00,
             max_positions=20,
             max_new_shorts_per_cycle=20,
-            per_symbol_exposure_target=0.08,
-            per_symbol_exposure_max=0.12,
+            per_symbol_exposure_target=0.12,
+            per_symbol_exposure_max=0.18,
             max_risk_quantity_expansion=3.0,
         )
     )
@@ -582,8 +582,8 @@ class ShortOnlySizingSection:
             max_gross_exposure=1.00,
             max_positions=20,
             max_new_shorts_per_cycle=20,
-            per_symbol_exposure_target=0.08,
-            per_symbol_exposure_max=0.12,
+            per_symbol_exposure_target=0.12,
+            per_symbol_exposure_max=0.18,
             max_risk_quantity_expansion=3.0,
         )
     )
@@ -593,8 +593,8 @@ class ShortOnlySizingSection:
             max_gross_exposure=1.00,
             max_positions=20,
             max_new_shorts_per_cycle=20,
-            per_symbol_exposure_target=0.08,
-            per_symbol_exposure_max=0.12,
+            per_symbol_exposure_target=0.12,
+            per_symbol_exposure_max=0.18,
             max_risk_quantity_expansion=3.0,
         )
     )
