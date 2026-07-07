@@ -190,6 +190,68 @@ class LocalPaperBroker:
         )
         return position
 
+    def add_to_position(self, signal: Signal, quantity_lots: int, timestamp: datetime) -> Position | None:
+        position = self.portfolio.positions.get(signal.instrument.symbol)
+        if position is None or quantity_lots < 1 or position.direction != signal.direction:
+            return None
+
+        is_buy = signal.direction == SignalDirection.LONG
+        fill_price = self._slipped_price(signal.entry_price, is_buy=is_buy)
+        added_units = quantity_lots * signal.instrument.lot_size
+        existing_units = position.quantity_units
+        notional = fill_price * added_units
+        commission = self._commission(notional)
+
+        if signal.instrument.instrument_type == InstrumentType.FUTURE:
+            margin_per_lot = (
+                signal.instrument.initial_margin_buy
+                if signal.direction == SignalDirection.LONG
+                else signal.instrument.initial_margin_sell
+            )
+            position.margin_requirement += margin_per_lot * quantity_lots
+            self.portfolio.cash -= commission
+        elif signal.direction == SignalDirection.LONG:
+            self.portfolio.cash -= notional + commission
+        else:
+            self.portfolio.cash += notional - commission
+
+        new_units = existing_units + added_units
+        if new_units <= 0:
+            return None
+        previous_entry = position.entry_price
+        position.entry_price = ((previous_entry * existing_units) + (fill_price * added_units)) / new_units
+        position.entry_commission += commission
+        position.quantity_lots += quantity_lots
+        position.current_price = fill_price
+        position.stop_price = signal.stop_price
+        position.take_profit = signal.take_profit
+        position.updated_at = timestamp
+        position.signal_strength = max(position.signal_strength, signal.strength)
+        position.entry_metadata = {
+            **position.entry_metadata,
+            "last_add": dict(signal.metadata),
+        }
+        self.events.append(
+            {
+                "timestamp": timestamp.isoformat(),
+                "symbol": signal.instrument.symbol,
+                "action": "add",
+                "direction": signal.direction.value,
+                "quantity_lots": quantity_lots,
+                "fill_price": fill_price,
+                "commission": commission,
+                "previous_entry_price": previous_entry,
+                "blended_entry_price": position.entry_price,
+                "total_quantity_lots": position.quantity_lots,
+                "reason": signal.reason,
+                "signal_strength": signal.strength,
+                "metadata": dict(signal.metadata),
+                "stop_price": signal.stop_price,
+                "take_profit": signal.take_profit,
+            }
+        )
+        return position
+
     def close_position(
         self,
         symbol: str,

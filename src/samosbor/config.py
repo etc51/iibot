@@ -519,7 +519,12 @@ class ShortOnlyEdgeSection:
     min_expected_net_edge_per_lot_rub: float = 0.0
     required_edge_buffer_bps: float = 2.0
     allow_price_action_edge_in_selloff: bool = True
+    allow_price_action_edge_in_clean_downtrend: bool = True
+    allow_price_action_edge_in_weak_down_choppy: bool = True
+    allow_price_action_edge_in_mixed_bearish: bool = True
     allow_ml_fallback_when_model_missing: bool = True
+    allow_price_action_fallback_when_ml_stale: bool = True
+    negative_ml_expected_edge_action: str = "no_trade"
 
 
 @dataclass(frozen=True)
@@ -530,6 +535,21 @@ class ShortOnlySizingRegimeSection:
     max_new_shorts_per_cycle: int = 0
     per_symbol_exposure_target: float = 0.0
     per_symbol_exposure_max: float = 0.0
+    max_risk_quantity_expansion: float = 1.0
+
+
+@dataclass(frozen=True)
+class ShortOnlyMixedBearishOverrideSection:
+    enabled: bool = True
+    min_breadth_down: float = 0.70
+    min_confidence: float = 0.50
+    min_symbols: int = 8
+    target_gross_exposure: float = 0.30
+    max_gross_exposure: float = 0.45
+    max_positions: int = 6
+    max_new_shorts_per_cycle: int = 5
+    per_symbol_exposure_target: float = 0.04
+    per_symbol_exposure_max: float = 0.07
 
 
 @dataclass(frozen=True)
@@ -542,26 +562,40 @@ class ShortOnlySizingSection:
             max_new_shorts_per_cycle=12,
             per_symbol_exposure_target=0.08,
             per_symbol_exposure_max=0.12,
+            max_risk_quantity_expansion=2.0,
         )
     )
     clean_downtrend: ShortOnlySizingRegimeSection = field(
         default_factory=lambda: ShortOnlySizingRegimeSection(
             target_gross_exposure=0.70,
-            max_gross_exposure=1.25,
+            max_gross_exposure=1.00,
             max_positions=10,
             max_new_shorts_per_cycle=8,
             per_symbol_exposure_target=0.06,
             per_symbol_exposure_max=0.10,
+            max_risk_quantity_expansion=1.6,
         )
     )
     weak_down_choppy: ShortOnlySizingRegimeSection = field(
         default_factory=lambda: ShortOnlySizingRegimeSection(
-            target_gross_exposure=0.35,
-            max_gross_exposure=1.25,
-            max_positions=6,
+            target_gross_exposure=0.40,
+            max_gross_exposure=0.60,
+            max_positions=7,
             max_new_shorts_per_cycle=6,
             per_symbol_exposure_target=0.04,
             per_symbol_exposure_max=0.07,
+            max_risk_quantity_expansion=1.3,
+        )
+    )
+    mixed_bearish: ShortOnlySizingRegimeSection = field(
+        default_factory=lambda: ShortOnlySizingRegimeSection(
+            target_gross_exposure=0.30,
+            max_gross_exposure=0.45,
+            max_positions=6,
+            max_new_shorts_per_cycle=5,
+            per_symbol_exposure_target=0.04,
+            per_symbol_exposure_max=0.07,
+            max_risk_quantity_expansion=1.2,
         )
     )
     range_chop: ShortOnlySizingRegimeSection = field(
@@ -570,6 +604,9 @@ class ShortOnlySizingSection:
             max_gross_exposure=0.0,
             max_positions=0,
             max_new_shorts_per_cycle=0,
+            per_symbol_exposure_target=0.0,
+            per_symbol_exposure_max=0.0,
+            max_risk_quantity_expansion=1.0,
         )
     )
 
@@ -592,7 +629,8 @@ class ShortOnlyConfirmationSection:
     normal_min_5m_bars: int = 1
     neutral_5m_multiplier: float = 0.85
     mild_rebound_multiplier: float = 0.65
-    strong_rebound_action: str = "no_trade"
+    strong_rebound_action: str = "reduce_size"
+    strong_rebound_multiplier: float = 0.35
     extreme_adverse_action: str = "no_trade"
 
 
@@ -610,6 +648,12 @@ class ShortOnlyExitsSection:
     use_existing_atr_stop: bool = True
     use_existing_take_profit: bool = True
     use_existing_runner: bool = True
+    early_loss_guard_enabled: bool = True
+    early_loss_guard_bars: int = 2
+    early_loss_guard_min_mfe_r: float = 0.25
+    early_loss_guard_exit_if_negative: bool = True
+    breakeven_after_mfe_r: float = 0.50
+    breakeven_buffer_bps: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -623,6 +667,7 @@ class ShortOnlySection:
             "market_selloff_impulse",
             "clean_downtrend",
             "weak_down_choppy",
+            "mixed_bearish",
         ]
     )
     allow_mixed_regime_shorts: bool = False
@@ -630,6 +675,13 @@ class ShortOnlySection:
     ml_is_edge_gate_not_blocker: bool = True
     microstructure_is_size_modifier_not_blocker: bool = True
     confirmation_is_size_modifier_not_blocker: bool = True
+    strategy_signal_is_optional: bool = True
+    allow_synthetic_short_candidates: bool = True
+    allow_existing_short_upsize: bool = True
+    paper_exposure_sizing_enabled: bool = True
+    mixed_bearish_override: ShortOnlyMixedBearishOverrideSection = field(
+        default_factory=ShortOnlyMixedBearishOverrideSection
+    )
     edge: ShortOnlyEdgeSection = field(default_factory=ShortOnlyEdgeSection)
     sizing: ShortOnlySizingSection = field(default_factory=ShortOnlySizingSection)
     microstructure: ShortOnlyMicrostructureSection = field(default_factory=ShortOnlyMicrostructureSection)
@@ -913,6 +965,15 @@ def _parse_short_only_sizing(payload: dict[str, Any] | None) -> ShortOnlySizingS
                 ),
             }
         ),
+        mixed_bearish=ShortOnlySizingRegimeSection(
+            **{
+                **default.mixed_bearish.__dict__,
+                **_dataclass_payload(
+                    ShortOnlySizingRegimeSection,
+                    raw.get("mixed_bearish", {}) if isinstance(raw.get("mixed_bearish"), dict) else {},
+                ),
+            }
+        ),
         range_chop=ShortOnlySizingRegimeSection(
             **{
                 **default.range_chop.__dict__,
@@ -932,6 +993,17 @@ def _parse_short_only(payload: dict[str, Any] | None, *, execution_mode: TradeMo
         **default.__dict__,
         **_dataclass_payload(ShortOnlySection, raw),
     }
+    values["mixed_bearish_override"] = ShortOnlyMixedBearishOverrideSection(
+        **{
+            **default.mixed_bearish_override.__dict__,
+            **_dataclass_payload(
+                ShortOnlyMixedBearishOverrideSection,
+                raw.get("mixed_bearish_override", {})
+                if isinstance(raw.get("mixed_bearish_override"), dict)
+                else {},
+            ),
+        }
+    )
     values["edge"] = ShortOnlyEdgeSection(
         **{
             **default.edge.__dict__,
@@ -1225,6 +1297,17 @@ def load_config(config_path: str | Path) -> AppConfig:
         paper_alpha_values["enabled"] = False
     paper_alpha_capture = PaperAlphaCaptureSection(**paper_alpha_values)
     short_only = _parse_short_only(raw.get("short_only", {}), execution_mode=execution.mode)
+    if short_only.enabled:
+        side_policy = SidePolicySection(
+            long=LongSidePolicySection(
+                **{
+                    **side_policy.long.__dict__,
+                    "normal_enabled": False,
+                    "probe_enabled": False,
+                    "exploration_enabled": False,
+                }
+            )
+        )
 
     backtest = BacktestSection(**raw.get("backtest", {}))
     reporting = ReportingSection(**raw.get("reporting", {}))

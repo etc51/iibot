@@ -97,7 +97,7 @@ def build_trade_review_payload(
         "policy_signal_distribution": _policy_signal_distribution(parsed_events),
         "policy_outcomes": _policy_outcomes(reviews),
         "weak_choppy_direct_probe_review": _weak_choppy_direct_probe_review(reviews, parsed_events),
-        "short_only_review": _short_only_review(reviews, parsed_events),
+        "short_only_review": _short_only_review(portfolio, reviews, parsed_events),
         "selloff_capture_review": _selloff_capture_review(reviews, parsed_events),
         "underallocation_review": _underallocation_review(parsed_events),
         "long_during_selloff_review": _long_during_selloff_review(reviews, parsed_events),
@@ -1175,11 +1175,16 @@ def _selloff_capture_review(
 
 
 def _short_only_review(
+    portfolio: PortfolioState,
     reviews: list[dict[str, object]],
     events: list[dict[str, object]],
 ) -> dict[str, object]:
     enabled = _short_only_enabled(reviews, events)
-    candidate_events = [event for event in events if event.get("action") == "short_only_short_candidate"]
+    candidate_events = [
+        event
+        for event in events
+        if event.get("action") in {"short_only_short_candidate", "short_only_upsize_candidate"}
+    ]
     short_only_signals = [
         event
         for event in events
@@ -1207,22 +1212,76 @@ def _short_only_review(
         for reason in _short_only_hard_reasons(event)
         if str(reason).strip()
     )
+    open_short_only_positions = [
+        position
+        for position in portfolio.positions.values()
+        if position.direction.value == "short"
+    ]
+    soft_reduced = [
+        event
+        for event in candidate_events
+        if (
+            _event_short_only(event).get("size_multiplier") is not None
+            and float(_event_short_only(event).get("size_multiplier", 1.0) or 1.0) < 1.0
+            and not _short_only_hard_reasons(event)
+        )
+    ]
     return {
         "short_only_enabled": enabled,
+        "active": enabled,
+        "live_disabled": True,
+        "active_regime": _latest_market_regime(events),
+        "effective_regime": _latest_effective_regime(events),
         "long_signals_ignored": sum(1 for event in events if event.get("action") == "long_signal_ignored_short_only"),
         "longs_flattened": sum(1 for event in events if event.get("action") == "long_position_flattened_short_only"),
+        "range_chop_no_trade_count": sum(1 for event in events if event.get("action") == "range_chop_no_trade_short_only"),
         "no_trade_range_chop_count": sum(1 for event in events if event.get("action") == "range_chop_no_trade_short_only"),
         "short_candidates_total": len(candidate_events),
+        "strategy_short_candidates": sum(
+            1 for event in candidate_events if not bool(_event_short_only(event).get("synthetic_candidate", False))
+        ),
+        "synthetic_short_candidates": sum(
+            1 for event in candidate_events if bool(_event_short_only(event).get("synthetic_candidate", False))
+        ),
+        "upsize_candidates": sum(1 for event in events if event.get("action") == "short_only_upsize_candidate"),
         "positive_ev_short_candidates": sum(1 for event in candidate_events if bool(event.get("edge_gate_passed", False))),
+        "positive_ev_candidates": sum(1 for event in candidate_events if bool(event.get("edge_gate_passed", False))),
         "shorts_opened": len(approved),
+        "shorts_upsized": sum(1 for event in events if event.get("action") == "short_only_upsize_opened"),
         "shorts_blocked_hard": len(blocked),
+        "hard_blocked_candidates": len(blocked),
+        "soft_reduced_candidates": len(soft_reduced),
         "average_expected_edge": round(sum(expected_edges) / len(expected_edges), 2) if expected_edges else 0.0,
         "realized_pnl_short_only": _pnl_for_reviews(short_only_reviews),
+        "open_pnl_short_only": round(sum(position.unrealized_pnl(position.current_price) for position in open_short_only_positions), 2),
         "pnl_by_regime": _group_breakdown(short_only_reviews, "market_regime") if short_only_reviews else [],
+        "pnl_by_effective_regime": _pnl_by_short_only_metadata_key(short_only_reviews, "effective_regime"),
+        "pnl_by_edge_source": _pnl_by_short_only_metadata_key(short_only_reviews, "edge_source"),
         "pnl_by_edge_bucket": _pnl_by_short_only_edge_bucket(short_only_reviews),
         "budget_target": latest_budget.get("budget_target_gross_rub", 0.0),
         "budget_used": latest_budget.get("budget_used_gross_rub", 0.0),
+        "budget_target_gross": latest_budget.get("budget_target_gross_rub", 0.0),
+        "budget_peak_gross": latest_budget.get("budget_used_gross_rub", 0.0),
+        "budget_used_pct": latest_budget.get("budget_used_pct", 0.0),
         "underallocated_count": sum(1 for event in events if event.get("action") == "short_only_underallocated"),
+        "underallocated_reasons": _short_only_underallocated_reasons(events),
+        "strong_rebound_reduced_count": sum(
+            1
+            for event in candidate_events
+            if _event_short_only(event).get("confirmation_status") == "strong_rebound"
+            and not _short_only_hard_reasons(event)
+        ),
+        "extreme_adverse_block_count": sum(
+            1 for event in blocked if "extreme adverse" in str(event.get("reason", "")).lower()
+        ),
+        "microstructure_soft_reduced_count": sum(
+            1 for event in candidate_events if bool(_event_short_only(event).get("microstructure_soft_reasons", []))
+        ),
+        "microstructure_hard_block_count": sum(
+            1 for event in blocked if "microstructure" in str(event.get("reason", "")).lower()
+        ),
+        "early_loss_guard_exits": sum(1 for event in events if event.get("action") == "short_only_early_loss_guard_exit"),
+        "breakeven_stop_armed_count": sum(1 for event in events if event.get("action") == "short_only_breakeven_stop_armed"),
         "top_hard_block_reasons": dict(sorted(hard_reasons.items(), key=lambda item: (-item[1], item[0]))[:10]),
     }
 
@@ -1780,6 +1839,54 @@ def _pnl_by_short_only_edge_bucket(reviews: list[dict[str, object]]) -> dict[str
         )
         for bucket in buckets
     }
+
+
+def _pnl_by_short_only_metadata_key(reviews: list[dict[str, object]], key: str) -> dict[str, object]:
+    buckets = sorted(
+        {
+            str(review.get("entry_metadata", {}).get("short_only", {}).get(key, "unknown"))
+            for review in reviews
+            if isinstance(review.get("entry_metadata", {}), dict)
+            and isinstance(review.get("entry_metadata", {}).get("short_only", {}), dict)
+        }
+    )
+    return {
+        bucket: _pnl_for_reviews(
+            [
+                review
+                for review in reviews
+                if isinstance(review.get("entry_metadata", {}), dict)
+                and isinstance(review.get("entry_metadata", {}).get("short_only", {}), dict)
+                and str(review.get("entry_metadata", {}).get("short_only", {}).get(key, "unknown")) == bucket
+            ]
+        )
+        for bucket in buckets
+    }
+
+
+def _latest_market_regime(events: list[dict[str, object]]) -> str:
+    for event in reversed(events):
+        if event.get("action") == "market_regime":
+            return str(event.get("regime", ""))
+    return ""
+
+
+def _latest_effective_regime(events: list[dict[str, object]]) -> str:
+    for event in reversed(events):
+        if event.get("action") == "short_only_mixed_bearish_override":
+            return str(event.get("effective_regime", ""))
+        if event.get("action") in {"short_only_budget_allocation", "short_only_no_trade_regime"}:
+            return str(event.get("regime", ""))
+    return _latest_market_regime(events)
+
+
+def _short_only_underallocated_reasons(events: list[dict[str, object]]) -> dict[str, int]:
+    reasons = Counter(
+        str(event.get("reason", "unknown"))
+        for event in events
+        if event.get("action") == "short_only_underallocated"
+    )
+    return dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0])))
 
 
 def _pending_event_is_addon(event: dict[str, object]) -> bool:

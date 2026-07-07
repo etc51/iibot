@@ -63,12 +63,23 @@ def test_focused_runtime_matches_project_goal():
         "market_selloff_impulse",
         "clean_downtrend",
         "weak_down_choppy",
+        "mixed_bearish",
     ]
+    assert config.short_only.strategy_signal_is_optional is True
+    assert config.short_only.allow_synthetic_short_candidates is True
+    assert config.short_only.allow_existing_short_upsize is True
+    assert config.short_only.paper_exposure_sizing_enabled is True
+    assert config.short_only.mixed_bearish_override.enabled is True
+    assert config.short_only.mixed_bearish_override.min_breadth_down == 0.70
     assert config.short_only.edge.min_expected_net_edge_rub == 5.0
+    assert config.short_only.edge.allow_price_action_edge_in_mixed_bearish is True
     assert config.short_only.sizing.market_selloff_impulse.target_gross_exposure == 1.00
     assert config.short_only.sizing.clean_downtrend.target_gross_exposure == 0.70
-    assert config.short_only.sizing.weak_down_choppy.target_gross_exposure == 0.35
+    assert config.short_only.sizing.weak_down_choppy.target_gross_exposure == 0.40
+    assert config.short_only.sizing.mixed_bearish.target_gross_exposure == 0.30
     assert config.short_only.microstructure.hard_max_spread_bps == 40.0
+    assert config.short_only.confirmation.strong_rebound_action == "reduce_size"
+    assert config.short_only.exits.early_loss_guard_enabled is True
     assert config.regime_policy.weak_down_choppy.short_direct_probe_enabled is True
     assert config.regime_policy.weak_down_choppy.short_direct_probe_min_signal_strength == 0.15
     assert config.regime_policy.weak_down_choppy.short_direct_exploration_min_signal_strength == 0.08
