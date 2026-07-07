@@ -447,8 +447,8 @@ class SymbolHealthPolicySection:
 @dataclass(frozen=True)
 class MarketSelloffBasketSection:
     enabled: bool = True
-    max_new_shorts_per_cycle: int = 12
-    max_selloff_positions: int = 12
+    max_new_shorts_per_cycle: int = 20
+    max_selloff_positions: int = 20
     per_symbol_risk_multiplier: float = 0.15
     per_symbol_exposure_target: float = 0.08
     per_symbol_exposure_max: float = 0.12
@@ -456,7 +456,7 @@ class MarketSelloffBasketSection:
     max_total_selloff_risk: float = 0.03
     prefer_liquid_symbols: bool = True
     min_symbols_to_trade: int = 4
-    max_symbols_to_trade: int = 12
+    max_symbols_to_trade: int = 20
 
 
 @dataclass(frozen=True)
@@ -544,12 +544,12 @@ class ShortOnlyMixedBearishOverrideSection:
     min_breadth_down: float = 0.70
     min_confidence: float = 0.50
     min_symbols: int = 8
-    target_gross_exposure: float = 0.30
-    max_gross_exposure: float = 0.45
-    max_positions: int = 6
-    max_new_shorts_per_cycle: int = 5
-    per_symbol_exposure_target: float = 0.04
-    per_symbol_exposure_max: float = 0.07
+    target_gross_exposure: float = 1.00
+    max_gross_exposure: float = 1.00
+    max_positions: int = 20
+    max_new_shorts_per_cycle: int = 20
+    per_symbol_exposure_target: float = 0.08
+    per_symbol_exposure_max: float = 0.12
 
 
 @dataclass(frozen=True)
@@ -558,44 +558,44 @@ class ShortOnlySizingSection:
         default_factory=lambda: ShortOnlySizingRegimeSection(
             target_gross_exposure=1.00,
             max_gross_exposure=1.25,
-            max_positions=12,
-            max_new_shorts_per_cycle=12,
+            max_positions=20,
+            max_new_shorts_per_cycle=20,
             per_symbol_exposure_target=0.08,
             per_symbol_exposure_max=0.12,
-            max_risk_quantity_expansion=2.0,
+            max_risk_quantity_expansion=3.0,
         )
     )
     clean_downtrend: ShortOnlySizingRegimeSection = field(
         default_factory=lambda: ShortOnlySizingRegimeSection(
-            target_gross_exposure=0.70,
+            target_gross_exposure=1.00,
             max_gross_exposure=1.00,
-            max_positions=10,
-            max_new_shorts_per_cycle=8,
-            per_symbol_exposure_target=0.06,
-            per_symbol_exposure_max=0.10,
-            max_risk_quantity_expansion=1.6,
+            max_positions=20,
+            max_new_shorts_per_cycle=20,
+            per_symbol_exposure_target=0.08,
+            per_symbol_exposure_max=0.12,
+            max_risk_quantity_expansion=3.0,
         )
     )
     weak_down_choppy: ShortOnlySizingRegimeSection = field(
         default_factory=lambda: ShortOnlySizingRegimeSection(
-            target_gross_exposure=0.40,
-            max_gross_exposure=0.60,
-            max_positions=7,
-            max_new_shorts_per_cycle=6,
-            per_symbol_exposure_target=0.04,
-            per_symbol_exposure_max=0.07,
-            max_risk_quantity_expansion=1.3,
+            target_gross_exposure=1.00,
+            max_gross_exposure=1.00,
+            max_positions=20,
+            max_new_shorts_per_cycle=20,
+            per_symbol_exposure_target=0.08,
+            per_symbol_exposure_max=0.12,
+            max_risk_quantity_expansion=3.0,
         )
     )
     mixed_bearish: ShortOnlySizingRegimeSection = field(
         default_factory=lambda: ShortOnlySizingRegimeSection(
-            target_gross_exposure=0.30,
-            max_gross_exposure=0.45,
-            max_positions=6,
-            max_new_shorts_per_cycle=5,
-            per_symbol_exposure_target=0.04,
-            per_symbol_exposure_max=0.07,
-            max_risk_quantity_expansion=1.2,
+            target_gross_exposure=1.00,
+            max_gross_exposure=1.00,
+            max_positions=20,
+            max_new_shorts_per_cycle=20,
+            per_symbol_exposure_target=0.08,
+            per_symbol_exposure_max=0.12,
+            max_risk_quantity_expansion=3.0,
         )
     )
     range_chop: ShortOnlySizingRegimeSection = field(

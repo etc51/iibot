@@ -34,14 +34,14 @@ def test_focused_runtime_matches_project_goal():
     assert config.learning_mode.allow_probe_to_use_global_position_slots is True
     assert config.learning_mode.allow_exploration_to_use_global_position_slots is True
     assert config.learning_risk.probe.risk_multiplier == 0.25
-    assert config.learning_risk.probe.max_positions == 12
+    assert config.learning_risk.probe.max_positions == 20
     assert config.learning_risk.probe.max_trades_per_day == 40
     assert config.learning_risk.probe.max_new_trades_per_cycle == 6
     assert config.learning_risk.probe.max_same_symbol_trades_per_day == 3
     assert config.learning_risk.probe.max_same_entry_mode_trades_per_day == 15
     assert config.learning_risk.probe.max_same_regime_trades_per_day == 25
     assert config.learning_risk.exploration.risk_multiplier == 0.10
-    assert config.learning_risk.exploration.max_positions == 12
+    assert config.learning_risk.exploration.max_positions == 20
     assert config.learning_risk.exploration.max_trades_per_day == 40
     assert config.learning_risk.exploration.max_new_trades_per_cycle == 6
     assert config.learning_risk.exploration.max_same_symbol_trades_per_day == 2
@@ -74,9 +74,16 @@ def test_focused_runtime_matches_project_goal():
     assert config.short_only.edge.min_expected_net_edge_rub == 5.0
     assert config.short_only.edge.allow_price_action_edge_in_mixed_bearish is True
     assert config.short_only.sizing.market_selloff_impulse.target_gross_exposure == 1.00
-    assert config.short_only.sizing.clean_downtrend.target_gross_exposure == 0.70
-    assert config.short_only.sizing.weak_down_choppy.target_gross_exposure == 0.40
-    assert config.short_only.sizing.mixed_bearish.target_gross_exposure == 0.30
+    assert config.short_only.sizing.market_selloff_impulse.max_positions == 20
+    assert config.short_only.sizing.market_selloff_impulse.max_new_shorts_per_cycle == 20
+    assert config.short_only.sizing.clean_downtrend.target_gross_exposure == 1.00
+    assert config.short_only.sizing.clean_downtrend.max_positions == 20
+    assert config.short_only.sizing.weak_down_choppy.target_gross_exposure == 1.00
+    assert config.short_only.sizing.weak_down_choppy.max_positions == 20
+    assert config.short_only.sizing.mixed_bearish.target_gross_exposure == 1.00
+    assert config.short_only.sizing.mixed_bearish.max_positions == 20
+    assert config.short_only.mixed_bearish_override.target_gross_exposure == 1.00
+    assert config.short_only.mixed_bearish_override.max_positions == 20
     assert config.short_only.microstructure.hard_max_spread_bps == 40.0
     assert config.short_only.confirmation.strong_rebound_action == "reduce_size"
     assert config.short_only.exits.early_loss_guard_enabled is True
@@ -96,14 +103,14 @@ def test_focused_runtime_matches_project_goal():
     assert config.side_policy.long.full_size_long_requires_clean_uptrend is True
     assert config.side_policy.long.exploration_risk_multiplier == 0.05
     assert config.market_selloff_impulse.basket.enabled is True
-    assert config.market_selloff_impulse.basket.max_new_shorts_per_cycle == 12
-    assert config.market_selloff_impulse.basket.max_selloff_positions == 12
+    assert config.market_selloff_impulse.basket.max_new_shorts_per_cycle == 20
+    assert config.market_selloff_impulse.basket.max_selloff_positions == 20
     assert config.market_selloff_impulse.basket.per_symbol_risk_multiplier == 0.15
     assert config.market_selloff_impulse.basket.per_symbol_exposure_target == 0.08
     assert config.market_selloff_impulse.basket.max_total_selloff_gross_exposure == 1.00
     assert config.market_selloff_impulse.basket.max_total_selloff_risk == 0.03
     assert config.market_selloff_impulse.basket.min_symbols_to_trade == 4
-    assert config.market_selloff_impulse.basket.max_symbols_to_trade == 12
+    assert config.market_selloff_impulse.basket.max_symbols_to_trade == 20
     assert config.market_selloff_impulse.risk.market_breakdown_short_multiplier == 0.60
     assert config.confirmation_5m.market_selloff_impulse.min_bars == 1
     assert config.confirmation_5m.market_selloff_impulse.neutral_confirmation_mode == "allow_reduced_short"
