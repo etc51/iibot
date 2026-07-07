@@ -628,6 +628,14 @@ def test_trade_review_exposes_post_close_analysis():
                     "outcome": "error",
                     "is_error": True,
                     "ml_verdict": "ml_warned_loss",
+                    "mfe_price": 101.0,
+                    "mae_price": 94.0,
+                    "mfe_pnl_rub": 10.0,
+                    "mae_pnl_rub": -60.0,
+                    "mae_abs_pnl_rub": 60.0,
+                    "mfe_r": 0.2,
+                    "mae_r": -1.2,
+                    "mae_abs_r": 1.2,
                     "summary": "error via stop-loss, -1.00R; ml_warned_loss",
                 }
             },
@@ -647,6 +655,14 @@ def test_trade_review_exposes_post_close_analysis():
     assert analysis["available"] is True
     assert analysis["outcome"] == "error"
     assert analysis["ml_verdict"] == "ml_warned_loss"
+    assert analysis["mfe_r"] == 0.2
+    assert analysis["mae_r"] == -1.2
+    review = payload["reviews"][0]
+    assert review["trade_excursion"]["available"] is True
+    assert review["mfe_price"] == 101.0
+    assert review["mae_price"] == 94.0
+    assert review["mfe_r"] == 0.2
+    assert review["mae_r"] == -1.2
 
 
 def test_trade_review_does_not_raise_signal_threshold_for_already_filtered_loss():

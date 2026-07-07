@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+import math
 from typing import Any
 
 
@@ -110,6 +111,10 @@ class Position:
     runner_activated_at: datetime | None = None
     runner_activation_price: float = 0.0
     runner_extreme_price: float = 0.0
+    mfe_price: float = 0.0
+    mfe_pnl: float = 0.0
+    mae_price: float = 0.0
+    mae_pnl: float = 0.0
 
     @property
     def quantity_units(self) -> int:
@@ -135,6 +140,43 @@ class Position:
         if self.direction == SignalDirection.LONG:
             return (mark - self.entry_price) * self.quantity_units
         return (self.entry_price - mark) * self.quantity_units
+
+    def record_price_extremes(
+        self,
+        *,
+        price: float | None = None,
+        low_price: float | None = None,
+        high_price: float | None = None,
+    ) -> None:
+        prices: list[float] = []
+        for candidate in (price, low_price, high_price):
+            normalized = _positive_finite_float(candidate)
+            if normalized is not None:
+                prices.append(normalized)
+        if not prices:
+            return
+
+        if self.mfe_price <= 0:
+            self.mfe_price = self.entry_price
+        if self.mae_price <= 0:
+            self.mae_price = self.entry_price
+
+        for candidate in prices:
+            pnl = self.unrealized_pnl(candidate)
+            if pnl > self.mfe_pnl:
+                self.mfe_pnl = pnl
+                self.mfe_price = candidate
+            if pnl < self.mae_pnl:
+                self.mae_pnl = pnl
+                self.mae_price = candidate
+
+    def refresh_excursion_pnl(self) -> None:
+        if self.mfe_price <= 0:
+            self.mfe_price = self.entry_price
+        if self.mae_price <= 0:
+            self.mae_price = self.entry_price
+        self.mfe_pnl = max(0.0, self.unrealized_pnl(self.mfe_price))
+        self.mae_pnl = min(0.0, self.unrealized_pnl(self.mae_price))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -173,6 +215,10 @@ class Position:
             ),
             "runner_activation_price": self.runner_activation_price,
             "runner_extreme_price": self.runner_extreme_price,
+            "mfe_price": self.mfe_price,
+            "mfe_pnl": self.mfe_pnl,
+            "mae_price": self.mae_price,
+            "mae_pnl": self.mae_pnl,
         }
 
     @classmethod
@@ -217,6 +263,10 @@ class Position:
             ),
             runner_activation_price=float(payload.get("runner_activation_price", 0.0)),
             runner_extreme_price=float(payload.get("runner_extreme_price", 0.0)),
+            mfe_price=float(payload.get("mfe_price", payload["entry_price"])),
+            mfe_pnl=float(payload.get("mfe_pnl", 0.0)),
+            mae_price=float(payload.get("mae_price", payload["entry_price"])),
+            mae_pnl=float(payload.get("mae_pnl", 0.0)),
         )
 
 
@@ -289,6 +339,16 @@ class TradeRecord:
     entry_metadata: dict[str, Any] = field(default_factory=dict)
     initial_stop_price: float = 0.0
     initial_take_profit: float = 0.0
+
+
+def _positive_finite_float(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
 
 
 @dataclass(frozen=True)

@@ -68,6 +68,7 @@ class BacktestEngine:
             if can_trade:
                 position = broker.portfolio.positions.get(symbol)
                 if position is not None:
+                    position.record_price_extremes(low_price=candle.low, high_price=candle.high)
                     exit_price, reason = self._check_exit(
                         broker,
                         symbol,

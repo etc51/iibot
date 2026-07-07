@@ -402,6 +402,7 @@ class TradingOrchestrator:
                 continue
             if latest is None:
                 continue
+            position.record_price_extremes(low_price=latest.low, high_price=latest.high)
             guard_events = self._short_only_exit_guard_events(
                 broker,
                 position,
@@ -2372,6 +2373,7 @@ class TradingOrchestrator:
             latest = candles[-1]
             position = broker.portfolio.positions.get(instrument.symbol)
             if position is not None:
+                position.record_price_extremes(low_price=latest.low, high_price=latest.high)
                 if position.direction.value == "long":
                     if latest.low <= position.stop_price:
                         broker.close_position(

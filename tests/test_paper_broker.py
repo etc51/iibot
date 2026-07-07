@@ -131,6 +131,14 @@ class PaperBrokerTest(unittest.TestCase):
         )
 
         opened = broker.open_position(signal, 2, datetime(2025, 1, 1, tzinfo=timezone.utc))
+        broker.mark_to_market(
+            {"SBER": 108.0},
+            datetime(2025, 1, 1, 1, 0, tzinfo=timezone.utc),
+        )
+        broker.mark_to_market(
+            {"SBER": 96.0},
+            datetime(2025, 1, 1, 2, 0, tzinfo=timezone.utc),
+        )
         self.assertEqual(opened.quantity_units, 20)
         trade = broker.close_position(
             "SBER",
@@ -149,8 +157,18 @@ class PaperBrokerTest(unittest.TestCase):
         self.assertEqual(trade.entry_metadata["trend_strength"], 0.03)
         self.assertEqual(trade.initial_stop_price, 95.0)
         self.assertEqual(trade.initial_take_profit, 110.0)
+        excursion = trade.entry_metadata["trade_excursion"]
+        self.assertEqual(excursion["mfe_price"], 110.0)
+        self.assertEqual(excursion["mae_price"], 96.0)
+        self.assertEqual(excursion["mfe_pnl_rub"], 200.0)
+        self.assertEqual(excursion["mae_pnl_rub"], -80.0)
+        self.assertEqual(excursion["mfe_r"], 2.0)
+        self.assertEqual(excursion["mae_r"], -0.8)
         self.assertEqual(trade.entry_metadata["post_close_analysis"]["outcome"], "profit")
         self.assertFalse(trade.entry_metadata["post_close_analysis"]["is_error"])
+        self.assertEqual(trade.entry_metadata["post_close_analysis"]["mfe_r"], 2.0)
+        self.assertEqual(trade.entry_metadata["post_close_analysis"]["mae_r"], -0.8)
+        self.assertEqual(broker.events[-1]["trade_excursion"]["mfe_r"], 2.0)
         self.assertEqual(broker.events[-1]["post_close_analysis"]["outcome"], "profit")
 
     def test_open_position_rejects_zero_lots(self):

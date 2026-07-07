@@ -122,6 +122,7 @@ class LocalPaperBroker:
         for symbol, position in self.portfolio.positions.items():
             if symbol in marks:
                 position.current_price = marks[symbol]
+                position.record_price_extremes(price=marks[symbol])
                 position.updated_at = timestamp
         equity = self.portfolio.equity(marks)
         self.portfolio.peak_equity = max(self.portfolio.peak_equity, equity)
@@ -168,6 +169,8 @@ class LocalPaperBroker:
             entry_metadata=dict(signal.metadata),
             initial_stop_price=signal.stop_price,
             initial_take_profit=signal.take_profit,
+            mfe_price=fill_price,
+            mae_price=fill_price,
         )
         self.portfolio.positions[signal.instrument.symbol] = position
         self.events.append(
@@ -226,6 +229,8 @@ class LocalPaperBroker:
         position.stop_price = signal.stop_price
         position.take_profit = signal.take_profit
         position.updated_at = timestamp
+        position.refresh_excursion_pnl()
+        position.record_price_extremes(price=fill_price)
         position.signal_strength = max(position.signal_strength, signal.strength)
         position.entry_metadata = {
             **position.entry_metadata,
@@ -264,6 +269,7 @@ class LocalPaperBroker:
         if position is None:
             return None
 
+        position.record_price_extremes(price=price)
         is_buy = position.direction == SignalDirection.SHORT
         fill_price = self._slipped_price(price, is_buy=is_buy)
         exit_reason = self._normalized_exit_reason(reason, position, trigger_price=price)
@@ -288,6 +294,7 @@ class LocalPaperBroker:
         net_pnl = gross_pnl - position.entry_commission - commission
         self.portfolio.realized_pnl += net_pnl
 
+        trade_excursion = _trade_excursion_metadata(position)
         trade = TradeRecord(
             symbol=symbol,
             direction=position.direction,
@@ -302,7 +309,10 @@ class LocalPaperBroker:
             signal_strength=position.signal_strength,
             entry_reason=position.entry_reason,
             entry_context_score=position.entry_context_score,
-            entry_metadata=dict(position.entry_metadata),
+            entry_metadata={
+                **position.entry_metadata,
+                "trade_excursion": trade_excursion,
+            },
             initial_stop_price=position.initial_stop_price or position.stop_price,
             initial_take_profit=position.initial_take_profit or position.take_profit,
         )
@@ -330,6 +340,9 @@ class LocalPaperBroker:
                 "entry_time": position.opened_at.isoformat(),
                 "entry_price": position.entry_price,
                 "signal_strength": position.signal_strength,
+                "trade_excursion": trade_excursion,
+                "mfe_r": post_close_analysis.get("mfe_r"),
+                "mae_r": post_close_analysis.get("mae_r"),
                 "post_close_analysis": post_close_analysis,
             }
         )
@@ -456,3 +469,30 @@ def _normalized_loaded_trade_reason(reason: str, *, net_pnl: float) -> str:
     if reason == ExitReason.STOP_LOSS.value and net_pnl > 0:
         return ExitReason.PROFIT_PROTECT_STOP.value
     return reason
+
+
+def _trade_excursion_metadata(position: Position) -> dict[str, float | bool | None]:
+    position.refresh_excursion_pnl()
+    planned_risk = _position_planned_risk_rub(position)
+    mfe_r = position.mfe_pnl / planned_risk if planned_risk and planned_risk > 0 else None
+    mae_r = position.mae_pnl / planned_risk if planned_risk and planned_risk > 0 else None
+    return {
+        "available": True,
+        "mfe_price": round(float(position.mfe_price or position.entry_price), 6),
+        "mae_price": round(float(position.mae_price or position.entry_price), 6),
+        "mfe_pnl_rub": round(float(max(0.0, position.mfe_pnl)), 2),
+        "mae_pnl_rub": round(float(min(0.0, position.mae_pnl)), 2),
+        "mae_abs_pnl_rub": round(float(abs(min(0.0, position.mae_pnl))), 2),
+        "mfe_r": round(mfe_r, 3) if mfe_r is not None else None,
+        "mae_r": round(mae_r, 3) if mae_r is not None else None,
+        "mae_abs_r": round(abs(mae_r), 3) if mae_r is not None else None,
+        "planned_risk_rub": round(planned_risk, 2) if planned_risk is not None else None,
+    }
+
+
+def _position_planned_risk_rub(position: Position) -> float | None:
+    stop_price = position.initial_stop_price or position.stop_price
+    distance = abs(float(position.entry_price) - float(stop_price))
+    if distance <= 0:
+        return None
+    return distance * position.quantity_units

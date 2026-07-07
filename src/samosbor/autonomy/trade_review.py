@@ -151,6 +151,7 @@ def _review_trade(
     microstructure = _microstructure_for_review(trade, microstructure_dir=microstructure_dir)
     ml_learning = _ml_learning_summary(trade.entry_metadata)
     post_close_analysis = _post_close_analysis_summary(trade.entry_metadata)
+    trade_excursion = _trade_excursion_summary(trade.entry_metadata, post_close_analysis)
     market_regime = _market_regime_summary(trade.entry_metadata)
     regime_policy = _regime_policy_summary(trade.entry_metadata)
     learning_caps = _learning_caps_summary(trade.entry_metadata, regime_policy)
@@ -209,6 +210,15 @@ def _review_trade(
         "learning_caps": learning_caps,
         "entry_ml_learning": ml_learning,
         "post_close_analysis": post_close_analysis,
+        "trade_excursion": trade_excursion,
+        "mfe_price": trade_excursion.get("mfe_price"),
+        "mae_price": trade_excursion.get("mae_price"),
+        "mfe_pnl_rub": trade_excursion.get("mfe_pnl_rub"),
+        "mae_pnl_rub": trade_excursion.get("mae_pnl_rub"),
+        "mae_abs_pnl_rub": trade_excursion.get("mae_abs_pnl_rub"),
+        "mfe_r": trade_excursion.get("mfe_r"),
+        "mae_r": trade_excursion.get("mae_r"),
+        "mae_abs_r": trade_excursion.get("mae_abs_r"),
         "entry_microstructure": microstructure,
         "microstructure_quality": _microstructure_quality(microstructure),
         "initial_stop_price": _rounded_or_none(initial_stop),
@@ -401,6 +411,14 @@ def _post_close_analysis_summary(metadata: dict[str, object]) -> dict[str, objec
         "exit_reason",
         "planned_risk_rub",
         "realized_r",
+        "mfe_price",
+        "mae_price",
+        "mfe_pnl_rub",
+        "mae_pnl_rub",
+        "mae_abs_pnl_rub",
+        "mfe_r",
+        "mae_r",
+        "mae_abs_r",
         "ml_available",
         "ml_probability_profit",
         "ml_expected_pnl_position_rub",
@@ -410,6 +428,39 @@ def _post_close_analysis_summary(metadata: dict[str, object]) -> dict[str, objec
         "summary",
     ]
     return {key: raw[key] for key in keys if key in raw}
+
+
+def _trade_excursion_summary(
+    metadata: dict[str, object],
+    post_close_analysis: dict[str, object],
+) -> dict[str, object]:
+    raw = metadata.get("trade_excursion", {}) if isinstance(metadata, dict) else {}
+    if not isinstance(raw, dict):
+        raw = {}
+    keys = [
+        "mfe_price",
+        "mae_price",
+        "mfe_pnl_rub",
+        "mae_pnl_rub",
+        "mae_abs_pnl_rub",
+        "mfe_r",
+        "mae_r",
+        "mae_abs_r",
+        "planned_risk_rub",
+    ]
+    result = {key: raw[key] for key in keys if key in raw}
+    for key in keys:
+        if key not in result and key in post_close_analysis:
+            result[key] = post_close_analysis[key]
+    if not result:
+        return {
+            "available": False,
+            "reason": "not captured",
+        }
+    return {
+        "available": True,
+        **result,
+    }
 
 
 def _market_regime_summary(metadata: dict[str, object]) -> str:

@@ -50,6 +50,7 @@ def build_post_close_learning_analysis(trade: TradeRecord) -> dict[str, object]:
     outcome = "profit" if trade.net_pnl > 0 else "error" if trade.net_pnl < 0 else "flat"
     planned_risk = _planned_risk_rub(trade)
     realized_r = trade.net_pnl / planned_risk if planned_risk and planned_risk > 0 else None
+    trade_excursion = _trade_excursion_summary(trade.entry_metadata)
     entry_learning = trade.entry_metadata.get("ml_learning", {})
     if not isinstance(entry_learning, dict):
         entry_learning = {}
@@ -110,7 +111,7 @@ def build_post_close_learning_analysis(trade: TradeRecord) -> dict[str, object]:
         if learning_tag in learning_tags:
             tags.append(learning_tag)
 
-    return {
+    result = {
         "available": True,
         "stage": "post_close",
         "outcome": outcome,
@@ -130,6 +131,8 @@ def build_post_close_learning_analysis(trade: TradeRecord) -> dict[str, object]:
         "tags": tags,
         "summary": _post_close_summary(outcome, trade.reason, realized_r, ml_verdict),
     }
+    result.update(trade_excursion)
+    return result
 
 
 def build_entry_candle_context(candles: list[Candle], direction: str) -> dict[str, object]:
@@ -625,6 +628,24 @@ def _infer_units(trade: TradeRecord) -> float:
     if abs(price_delta) > 1e-12 and abs(trade.gross_pnl) > 1e-12:
         return abs(trade.gross_pnl / price_delta)
     return max(1, int(trade.quantity_lots))
+
+
+def _trade_excursion_summary(metadata: dict[str, object]) -> dict[str, object]:
+    raw = metadata.get("trade_excursion", {}) if isinstance(metadata, dict) else {}
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    keys = [
+        "mfe_price",
+        "mae_price",
+        "mfe_pnl_rub",
+        "mae_pnl_rub",
+        "mae_abs_pnl_rub",
+        "mfe_r",
+        "mae_r",
+        "mae_abs_r",
+        "planned_risk_rub",
+    ]
+    return {key: raw[key] for key in keys if key in raw}
 
 
 def _optional_float(value: object) -> float | None:
