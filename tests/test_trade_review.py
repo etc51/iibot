@@ -263,6 +263,19 @@ def test_trade_review_short_only_section_and_legacy_long_learning_marker():
                 }
             },
         },
+        {
+            "timestamp": opened.isoformat(),
+            "action": "short_only_synthetic_shadow_only",
+            "symbol": "GAZP",
+            "metadata": {
+                "short_only": {
+                    "enabled": True,
+                    "synthetic_candidate": True,
+                    "synthetic_reason": "strategy_missing_short_signal",
+                    "edge_source": "ml",
+                }
+            },
+        },
     ]
 
     payload = build_trade_review_payload(
@@ -279,6 +292,18 @@ def test_trade_review_short_only_section_and_legacy_long_learning_marker():
     assert payload["short_only_review"]["positive_ev_short_candidates"] == 1
     assert payload["short_only_review"]["shorts_opened"] == 1
     assert payload["short_only_review"]["pnl_by_edge_bucket"]["medium_positive"]["net_pnl_rub"] == 80.0
+    assert payload["short_only_review"]["pnl_by_source"]["strategy_short"]["net_pnl_rub"] == 80.0
+    assert payload["short_only_review"]["source_validation"]["strategy_short_real"]["trades"] == 1
+    assert payload["short_only_review"]["source_validation"]["synthetic_shadow"]["count"] == 1
+    assert payload["short_only_review"]["source_validation"]["ml_only_shadow"]["count"] == 1
+    disabled = {
+        item["source"]: item
+        for item in payload["short_only_review"]["disabled_sources"]
+    }
+    assert disabled["synthetic"]["real_trading_enabled"] is False
+    assert disabled["upsize"]["real_trading_enabled"] is False
+    assert disabled["mixed_bearish"]["real_trading_enabled"] is False
+    assert disabled["paper_exposure_sizing"]["real_trading_enabled"] is False
     assert payload["long_learning_review"]["active"] is False
     assert payload["long_learning_review"]["legacy_only"] is True
 

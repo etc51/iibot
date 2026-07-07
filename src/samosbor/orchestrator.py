@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .analysis.indicators import atr
 from .autonomy.entry_schedule import (
@@ -495,9 +496,6 @@ class TradingOrchestrator:
             existing_position = broker.portfolio.positions.get(instrument.symbol)
             if existing_position is not None and existing_position.direction == SignalDirection.LONG:
                 continue
-            if existing_position is not None and not bool(self.config.short_only.allow_existing_short_upsize):
-                continue
-
             strategy_signal = strategy.generate_signal(instrument, candles)
             source_strategy_direction = strategy_signal.direction.value if strategy_signal is not None else "none"
             if strategy_signal is not None and strategy_signal.direction == SignalDirection.LONG:
@@ -515,7 +513,9 @@ class TradingOrchestrator:
             signal = None
             if strategy_signal is not None and strategy_signal.direction == SignalDirection.SHORT:
                 signal = strategy_signal
-            elif bool(self.config.short_only.strategy_signal_is_optional):
+            elif bool(self.config.short_only.allow_synthetic_short_candidates) and bool(
+                self.config.short_only.synthetic.enabled
+            ):
                 signal = self._short_only_synthetic_short_signal(
                     instrument,
                     candles,
@@ -648,6 +648,7 @@ class TradingOrchestrator:
                 "is_upsize": is_upsize,
                 "existing_quantity_lots": int(existing_position.quantity_lots) if is_upsize else 0,
                 "source_strategy_signal": source_strategy_direction,
+                "real_trade_source": "strategy_short" if source_strategy_direction == "short" else "synthetic",
             })
             metadata["short_only"] = short_only_metadata
             signal_for_entry = replace(signal_for_entry, metadata=metadata)
@@ -669,13 +670,63 @@ class TradingOrchestrator:
                 }
             )
             if hard_reasons:
+                hard_reason_text = "; ".join(hard_reasons)
+                if self._short_only_shadow_enabled_for_block(
+                    metadata["short_only"],
+                    confirmation_status=str(confirmation.get("status", "")),
+                ):
+                    signal_for_entry = self._short_only_mark_shadow_only_signal(
+                        signal_for_entry,
+                        reason=hard_reason_text,
+                    )
+                    cycle_events.append(
+                        self._short_only_shadow_event(
+                            signal_for_entry,
+                            market_regime=market_regime,
+                            timestamp=latest.timestamp,
+                            reason=hard_reason_text,
+                            is_upsize=is_upsize,
+                        )
+                    )
                 cycle_events.append(
                     self._short_only_signal_event(
                         signal_for_entry,
                         market_regime=market_regime,
                         timestamp=latest.timestamp,
                         approved=False,
-                        reason="; ".join(hard_reasons),
+                        reason=hard_reason_text,
+                        quantity_lots=0,
+                        original_quantity_lots=quantity_lots,
+                    )
+                )
+                continue
+            shadow_reason = self._short_only_real_entry_block_reason(
+                signal_for_entry,
+                market_regime=market_regime,
+                source_strategy_direction=source_strategy_direction,
+                is_upsize=is_upsize,
+            )
+            if shadow_reason:
+                signal_for_entry = self._short_only_mark_shadow_only_signal(
+                    signal_for_entry,
+                    reason=shadow_reason,
+                )
+                cycle_events.append(
+                    self._short_only_shadow_event(
+                        signal_for_entry,
+                        market_regime=market_regime,
+                        timestamp=latest.timestamp,
+                        reason=shadow_reason,
+                        is_upsize=is_upsize,
+                    )
+                )
+                cycle_events.append(
+                    self._short_only_signal_event(
+                        signal_for_entry,
+                        market_regime=market_regime,
+                        timestamp=latest.timestamp,
+                        approved=False,
+                        reason=shadow_reason,
                         quantity_lots=0,
                         original_quantity_lots=quantity_lots,
                     )
@@ -716,18 +767,53 @@ class TradingOrchestrator:
         sizing = self._short_only_sizing_for_regime(market_regime.regime)
         equity = broker.portfolio.equity(marks)
         target_gross = max(0.0, equity * float(getattr(sizing, "target_gross_exposure", 0.0)))
-        regime_max_gross = float(getattr(sizing, "max_gross_exposure", 0.0) or self.config.risk.max_gross_exposure)
+        regime_max_gross = float(getattr(sizing, "max_gross_exposure", self.config.risk.max_gross_exposure))
         max_gross = equity * min(float(self.config.risk.max_gross_exposure), regime_max_gross)
+        regime_max_positions = int(getattr(sizing, "max_positions", self.config.risk.max_positions))
         max_positions = min(
             int(self.config.risk.max_positions),
-            int(getattr(sizing, "max_positions", 0) or self.config.risk.max_positions),
+            regime_max_positions,
         )
-        max_new = int(getattr(sizing, "max_new_shorts_per_cycle", 0) or len(candidates))
+        max_new = int(getattr(sizing, "max_new_shorts_per_cycle", len(candidates)))
         opened = 0
         blocked: Counter[str] = Counter()
+        damage_guard = self._short_only_damage_guard_state(broker, marks, timestamp)
+        if damage_guard["triggered"]:
+            events.append(
+                {
+                    **damage_guard,
+                    "timestamp": timestamp.isoformat(),
+                    "action": "short_only_damage_guard_triggered",
+                }
+            )
         for candidate in candidates:
             signal = candidate["signal"]
             is_upsize = bool(candidate.get("is_upsize", False))
+            if damage_guard["triggered"]:
+                blocked["damage_guard"] += 1
+                reason = "short_only damage guard triggered"
+                signal = self._short_only_mark_shadow_only_signal(signal, reason=reason)
+                events.append(
+                    self._short_only_shadow_event(
+                        signal,
+                        market_regime=market_regime,
+                        timestamp=candidate["timestamp"],
+                        reason=reason,
+                        is_upsize=is_upsize,
+                    )
+                )
+                events.append(
+                    self._short_only_signal_event(
+                        signal,
+                        market_regime=market_regime,
+                        timestamp=candidate["timestamp"],
+                        approved=False,
+                        reason=reason,
+                        quantity_lots=0,
+                        original_quantity_lots=int(candidate["risk_quantity_lots"]),
+                    )
+                )
+                continue
             if opened >= max_new:
                 blocked["max_new_shorts_per_cycle"] += 1
                 events.append(
@@ -936,6 +1022,7 @@ class TradingOrchestrator:
         budget_lots = int(budget // notional_per_lot)
         paper_sizing = (
             bool(self.config.short_only.paper_exposure_sizing_enabled)
+            and bool(self.config.short_only.paper_exposure_sizing.enabled)
             and self.config.execution.mode.value == "local-paper"
         )
         cap_reason = "budget_lots"
@@ -968,6 +1055,42 @@ class TradingOrchestrator:
             "paper_exposure_sizing_enabled": paper_sizing,
             "current_symbol_gross_rub": round(current_symbol_gross, 2),
             "remaining_symbol_budget_rub": round(budget, 2),
+        }
+
+    def _short_only_damage_guard_state(self, broker, marks: dict[str, float], timestamp: datetime) -> dict[str, object]:
+        cfg = self.config.short_only.damage_guard
+        if not bool(cfg.enabled):
+            return {"enabled": False, "triggered": False}
+        timezone_info = ZoneInfo(self.config.app.timezone)
+        today = timestamp.astimezone(timezone_info).date()
+        daily_realized = sum(
+            trade.net_pnl
+            for trade in broker.trades
+            if trade.exit_time.astimezone(timezone_info).date() == today
+        )
+        open_pnl = 0.0
+        if bool(cfg.include_open_pnl):
+            open_pnl = sum(
+                position.unrealized_pnl(marks.get(symbol, position.current_price))
+                for symbol, position in broker.portfolio.positions.items()
+            )
+        equity = broker.portfolio.equity(marks)
+        combined = daily_realized + open_pnl
+        loss_limit_rub = -abs(float(cfg.daily_loss_limit_rub))
+        loss_limit_pct_rub = -abs(equity * float(cfg.daily_loss_limit_pct))
+        triggered = combined <= loss_limit_rub or combined <= loss_limit_pct_rub
+        return {
+            "enabled": True,
+            "triggered": bool(triggered),
+            "action": str(cfg.action),
+            "daily_realized_pnl_rub": round(daily_realized, 2),
+            "open_pnl_rub": round(open_pnl, 2),
+            "combined_pnl_rub": round(combined, 2),
+            "daily_loss_limit_rub": round(loss_limit_rub, 2),
+            "daily_loss_limit_pct_rub": round(loss_limit_pct_rub, 2),
+            "allow_exits": bool(cfg.allow_exits),
+            "allow_position_management": bool(cfg.allow_position_management),
+            "allow_shadow_candidates": bool(cfg.allow_shadow_candidates),
         }
 
     def _short_only_edge_gate(
@@ -1185,6 +1308,106 @@ class TradingOrchestrator:
             "metadata": metadata,
         }
 
+    def _short_only_real_entry_block_reason(
+        self,
+        signal,
+        *,
+        market_regime,
+        source_strategy_direction: str,
+        is_upsize: bool,
+    ) -> str:
+        short_only = signal.metadata.get("short_only", {})
+        if not isinstance(short_only, dict):
+            short_only = {}
+        if is_upsize and not (
+            bool(self.config.short_only.allow_existing_short_upsize)
+            and bool(self.config.short_only.upsize.enabled)
+            and bool(self.config.short_only.upsize.real_trading_enabled)
+        ):
+            return "short_only upsize real trading disabled"
+        if market_regime.regime == "mixed_bearish" and not bool(
+            self.config.short_only.mixed_bearish_override.real_trading_enabled
+        ):
+            return "short_only mixed_bearish real trading disabled"
+        if bool(short_only.get("synthetic_candidate", False)):
+            if not bool(self.config.short_only.synthetic.real_trading_enabled):
+                return "short_only synthetic real trading disabled"
+        if source_strategy_direction != "short":
+            return "short_only real trade requires strategy_short"
+        if (
+            bool(self.config.short_only.ml.positive_edge_is_required_but_not_sufficient)
+            and str(short_only.get("edge_source", "")) != "ml"
+        ):
+            return "short_only real trade requires positive ML edge"
+        if not bool(short_only.get("edge_gate_passed", False)):
+            return "short_only real trade requires positive edge after buffer"
+        if str(short_only.get("confirmation_status", "")) in {"strong_rebound", "extreme_adverse"}:
+            return "short_only confirmation blocks real short"
+        return ""
+
+    def _short_only_shadow_enabled_for_block(
+        self,
+        short_only: dict[str, object],
+        *,
+        confirmation_status: str,
+    ) -> bool:
+        if bool(short_only.get("synthetic_candidate", False)):
+            return bool(self.config.short_only.synthetic.shadow_only)
+        if bool(short_only.get("is_upsize", False)):
+            return bool(self.config.short_only.upsize.shadow_only)
+        if str(short_only.get("effective_regime", "")) == "mixed_bearish":
+            return bool(self.config.short_only.mixed_bearish_override.shadow_only)
+        return confirmation_status in {"strong_rebound", "extreme_adverse"}
+
+    @staticmethod
+    def _short_only_mark_shadow_only_signal(signal, *, reason: str):
+        metadata = dict(signal.metadata)
+        short_only = dict(metadata.get("short_only", {}))
+        short_only.update(
+            {
+                "real_trade_allowed": False,
+                "shadow_only": True,
+                "shadow_only_reason": reason,
+            }
+        )
+        if bool(short_only.get("synthetic_candidate", False)):
+            short_only["synthetic_disabled_by_loss_diagnostics"] = True
+        metadata["short_only"] = short_only
+        return replace(signal, metadata=metadata)
+
+    def _short_only_shadow_event(
+        self,
+        signal,
+        *,
+        market_regime,
+        timestamp: datetime,
+        reason: str,
+        is_upsize: bool,
+    ) -> dict[str, object]:
+        metadata = dict(signal.metadata)
+        short_only = dict(metadata.get("short_only", {}))
+        reason_lower = reason.lower()
+        if is_upsize:
+            action = "short_only_upsize_shadow_only"
+        elif bool(short_only.get("synthetic_candidate", False)):
+            action = "short_only_synthetic_shadow_only"
+        elif market_regime.regime == "mixed_bearish":
+            action = "short_only_mixed_bearish_shadow_only"
+        elif "strong rebound" in reason_lower:
+            action = "short_only_strong_rebound_shadow_only"
+        else:
+            action = "short_only_shadow_only"
+        return {
+            "timestamp": timestamp.isoformat(),
+            "symbol": signal.instrument.symbol,
+            "action": action,
+            "regime": market_regime.regime,
+            "direction": signal.direction.value,
+            "strength": signal.strength,
+            "reason": reason,
+            "metadata": {"short_only": short_only},
+        }
+
     @staticmethod
     def _short_only_edge_bucket(edge_after_required: float) -> str:
         if edge_after_required <= 0:
@@ -1258,6 +1481,24 @@ class TradingOrchestrator:
             failures.append("range_chop sizing must be zero")
         if not bool(self.config.short_only.pullback_is_addon_not_required):
             failures.append("pullback cannot be required for short-only entries")
+        if bool(self.config.short_only.strategy_signal_is_optional):
+            failures.append("strategy_signal_is_optional must stay false")
+        if bool(self.config.short_only.synthetic.real_trading_enabled):
+            failures.append("synthetic real trading must stay disabled")
+        if bool(self.config.short_only.paper_exposure_sizing_enabled) or bool(
+            self.config.short_only.paper_exposure_sizing.enabled
+        ):
+            failures.append("paper exposure sizing must stay disabled")
+        if bool(self.config.short_only.allow_existing_short_upsize) or bool(
+            self.config.short_only.upsize.real_trading_enabled
+        ):
+            failures.append("upsize real trading must stay disabled")
+        if bool(self.config.short_only.mixed_bearish_override.real_trading_enabled):
+            failures.append("mixed_bearish real trading must stay disabled")
+        if str(self.config.short_only.confirmation.strong_rebound_action) != "no_trade":
+            failures.append("strong rebound must block real short entries")
+        if not bool(self.config.short_only.damage_guard.enabled):
+            failures.append("short_only damage guard must stay enabled")
         return [
             {
                 "timestamp": timestamp.isoformat(),

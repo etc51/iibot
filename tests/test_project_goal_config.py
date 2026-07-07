@@ -65,12 +65,21 @@ def test_focused_runtime_matches_project_goal():
         "weak_down_choppy",
         "mixed_bearish",
     ]
-    assert config.short_only.strategy_signal_is_optional is True
+    assert config.short_only.strategy_signal_is_optional is False
     assert config.short_only.allow_synthetic_short_candidates is True
-    assert config.short_only.allow_existing_short_upsize is True
-    assert config.short_only.paper_exposure_sizing_enabled is True
+    assert config.short_only.synthetic.enabled is True
+    assert config.short_only.synthetic.real_trading_enabled is False
+    assert config.short_only.synthetic.shadow_only is True
+    assert config.short_only.allow_existing_short_upsize is False
+    assert config.short_only.upsize.enabled is False
+    assert config.short_only.upsize.real_trading_enabled is False
+    assert config.short_only.upsize.shadow_only is True
+    assert config.short_only.paper_exposure_sizing_enabled is False
+    assert config.short_only.paper_exposure_sizing.enabled is False
     assert config.short_only.mixed_bearish_override.enabled is True
     assert config.short_only.mixed_bearish_override.min_breadth_down == 0.70
+    assert config.short_only.mixed_bearish_override.real_trading_enabled is False
+    assert config.short_only.mixed_bearish_override.shadow_only is True
     assert config.short_only.edge.min_expected_net_edge_rub == 5.0
     assert config.short_only.edge.allow_price_action_edge_in_mixed_bearish is True
     assert config.short_only.sizing.market_selloff_impulse.target_gross_exposure == 1.00
@@ -80,18 +89,30 @@ def test_focused_runtime_matches_project_goal():
     assert config.short_only.sizing.market_selloff_impulse.per_symbol_exposure_max == 0.18
     assert config.short_only.sizing.clean_downtrend.target_gross_exposure == 1.00
     assert config.short_only.sizing.clean_downtrend.max_positions == 20
-    assert config.short_only.sizing.weak_down_choppy.target_gross_exposure == 1.00
-    assert config.short_only.sizing.weak_down_choppy.max_positions == 20
-    assert config.short_only.sizing.weak_down_choppy.per_symbol_exposure_target == 0.12
-    assert config.short_only.sizing.weak_down_choppy.per_symbol_exposure_max == 0.18
-    assert config.short_only.sizing.mixed_bearish.target_gross_exposure == 1.00
-    assert config.short_only.sizing.mixed_bearish.max_positions == 20
-    assert config.short_only.mixed_bearish_override.target_gross_exposure == 1.00
-    assert config.short_only.mixed_bearish_override.max_positions == 20
-    assert config.short_only.mixed_bearish_override.per_symbol_exposure_target == 0.12
-    assert config.short_only.mixed_bearish_override.per_symbol_exposure_max == 0.18
+    assert config.short_only.sizing.market_selloff_impulse.max_risk_quantity_expansion == 1.0
+    assert config.short_only.sizing.clean_downtrend.max_risk_quantity_expansion == 1.0
+    assert config.short_only.sizing.weak_down_choppy.target_gross_exposure == 0.15
+    assert config.short_only.sizing.weak_down_choppy.max_gross_exposure == 0.25
+    assert config.short_only.sizing.weak_down_choppy.max_positions == 3
+    assert config.short_only.sizing.weak_down_choppy.max_new_shorts_per_cycle == 2
+    assert config.short_only.sizing.weak_down_choppy.per_symbol_exposure_target == 0.03
+    assert config.short_only.sizing.weak_down_choppy.per_symbol_exposure_max == 0.05
+    assert config.short_only.sizing.weak_down_choppy.max_risk_quantity_expansion == 1.0
+    assert config.short_only.sizing.mixed_bearish.target_gross_exposure == 0.0
+    assert config.short_only.sizing.mixed_bearish.max_positions == 0
+    assert config.short_only.mixed_bearish_override.target_gross_exposure == 0.0
+    assert config.short_only.mixed_bearish_override.max_positions == 0
+    assert config.short_only.mixed_bearish_override.per_symbol_exposure_target == 0.0
+    assert config.short_only.mixed_bearish_override.per_symbol_exposure_max == 0.0
     assert config.short_only.microstructure.hard_max_spread_bps == 40.0
-    assert config.short_only.confirmation.strong_rebound_action == "reduce_size"
+    assert config.short_only.confirmation.strong_rebound_action == "no_trade"
+    assert config.short_only.ml.positive_edge_is_required_but_not_sufficient is True
+    assert config.short_only.ml.ml_positive_standalone_real_trading is False
+    assert config.short_only.ml.missing_model_action == "no_trade"
+    assert config.short_only.damage_guard.enabled is True
+    assert config.short_only.damage_guard.daily_loss_limit_rub == 1500.0
+    assert config.short_only.damage_guard.daily_loss_limit_pct == 0.005
+    assert config.short_only.damage_guard.include_open_pnl is True
     assert config.short_only.exits.early_loss_guard_enabled is True
     assert config.regime_policy.weak_down_choppy.short_direct_probe_enabled is True
     assert config.regime_policy.weak_down_choppy.short_direct_probe_min_signal_strength == 0.15

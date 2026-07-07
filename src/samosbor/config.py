@@ -544,12 +544,16 @@ class ShortOnlyMixedBearishOverrideSection:
     min_breadth_down: float = 0.70
     min_confidence: float = 0.50
     min_symbols: int = 8
-    target_gross_exposure: float = 1.00
-    max_gross_exposure: float = 1.00
-    max_positions: int = 20
-    max_new_shorts_per_cycle: int = 20
-    per_symbol_exposure_target: float = 0.12
-    per_symbol_exposure_max: float = 0.18
+    target_gross_exposure: float = 0.0
+    max_gross_exposure: float = 0.0
+    max_positions: int = 0
+    max_new_shorts_per_cycle: int = 0
+    per_symbol_exposure_target: float = 0.0
+    per_symbol_exposure_max: float = 0.0
+    real_trading_enabled: bool = False
+    shadow_only: bool = True
+    min_shadow_trades_before_reenable: int = 100
+    reenable_requires_positive_expectancy: bool = True
 
 
 @dataclass(frozen=True)
@@ -562,7 +566,7 @@ class ShortOnlySizingSection:
             max_new_shorts_per_cycle=20,
             per_symbol_exposure_target=0.12,
             per_symbol_exposure_max=0.18,
-            max_risk_quantity_expansion=3.0,
+            max_risk_quantity_expansion=1.0,
         )
     )
     clean_downtrend: ShortOnlySizingRegimeSection = field(
@@ -573,29 +577,29 @@ class ShortOnlySizingSection:
             max_new_shorts_per_cycle=20,
             per_symbol_exposure_target=0.12,
             per_symbol_exposure_max=0.18,
-            max_risk_quantity_expansion=3.0,
+            max_risk_quantity_expansion=1.0,
         )
     )
     weak_down_choppy: ShortOnlySizingRegimeSection = field(
         default_factory=lambda: ShortOnlySizingRegimeSection(
-            target_gross_exposure=1.00,
-            max_gross_exposure=1.00,
-            max_positions=20,
-            max_new_shorts_per_cycle=20,
-            per_symbol_exposure_target=0.12,
-            per_symbol_exposure_max=0.18,
-            max_risk_quantity_expansion=3.0,
+            target_gross_exposure=0.15,
+            max_gross_exposure=0.25,
+            max_positions=3,
+            max_new_shorts_per_cycle=2,
+            per_symbol_exposure_target=0.03,
+            per_symbol_exposure_max=0.05,
+            max_risk_quantity_expansion=1.0,
         )
     )
     mixed_bearish: ShortOnlySizingRegimeSection = field(
         default_factory=lambda: ShortOnlySizingRegimeSection(
-            target_gross_exposure=1.00,
-            max_gross_exposure=1.00,
-            max_positions=20,
-            max_new_shorts_per_cycle=20,
-            per_symbol_exposure_target=0.12,
-            per_symbol_exposure_max=0.18,
-            max_risk_quantity_expansion=3.0,
+            target_gross_exposure=0.0,
+            max_gross_exposure=0.0,
+            max_positions=0,
+            max_new_shorts_per_cycle=0,
+            per_symbol_exposure_target=0.0,
+            per_symbol_exposure_max=0.0,
+            max_risk_quantity_expansion=1.0,
         )
     )
     range_chop: ShortOnlySizingRegimeSection = field(
@@ -629,7 +633,7 @@ class ShortOnlyConfirmationSection:
     normal_min_5m_bars: int = 1
     neutral_5m_multiplier: float = 0.85
     mild_rebound_multiplier: float = 0.65
-    strong_rebound_action: str = "reduce_size"
+    strong_rebound_action: str = "no_trade"
     strong_rebound_multiplier: float = 0.35
     extreme_adverse_action: str = "no_trade"
 
@@ -637,10 +641,50 @@ class ShortOnlyConfirmationSection:
 @dataclass(frozen=True)
 class ShortOnlyMlSection:
     allow_if_expected_net_edge_positive: bool = True
+    positive_edge_is_required_but_not_sufficient: bool = True
+    ml_positive_standalone_real_trading: bool = False
     negative_edge_action: str = "no_trade"
-    missing_model_action: str = "price_action_fallback"
+    missing_model_action: str = "no_trade"
     positive_edge_multiplier: float = 1.0
     weak_positive_edge_multiplier: float = 0.5
+
+
+@dataclass(frozen=True)
+class ShortOnlySyntheticSection:
+    enabled: bool = True
+    real_trading_enabled: bool = False
+    shadow_only: bool = True
+    reason: str = "disabled_after_0_53_short_only_winners"
+    min_shadow_trades_before_reenable: int = 100
+    reenable_requires_positive_expectancy: bool = True
+    reenable_requires_profit_factor: float = 1.15
+
+
+@dataclass(frozen=True)
+class ShortOnlyPaperExposureSizingSection:
+    enabled: bool = False
+    reason: str = "disabled_after_expanded_size_losses"
+
+
+@dataclass(frozen=True)
+class ShortOnlyUpsizeSection:
+    enabled: bool = False
+    real_trading_enabled: bool = False
+    shadow_only: bool = True
+    reason: str = "disabled_until_strategy_short_baseline_positive"
+
+
+@dataclass(frozen=True)
+class ShortOnlyDamageGuardSection:
+    enabled: bool = True
+    daily_loss_limit_rub: float = 1500.0
+    daily_loss_limit_pct: float = 0.005
+    include_open_pnl: bool = True
+    action: str = "block_new_entries"
+    allow_exits: bool = True
+    allow_position_management: bool = True
+    allow_shadow_candidates: bool = True
+    reset_next_session: bool = True
 
 
 @dataclass(frozen=True)
@@ -675,13 +719,19 @@ class ShortOnlySection:
     ml_is_edge_gate_not_blocker: bool = True
     microstructure_is_size_modifier_not_blocker: bool = True
     confirmation_is_size_modifier_not_blocker: bool = True
-    strategy_signal_is_optional: bool = True
+    strategy_signal_is_optional: bool = False
     allow_synthetic_short_candidates: bool = True
-    allow_existing_short_upsize: bool = True
-    paper_exposure_sizing_enabled: bool = True
+    allow_existing_short_upsize: bool = False
+    paper_exposure_sizing_enabled: bool = False
     mixed_bearish_override: ShortOnlyMixedBearishOverrideSection = field(
         default_factory=ShortOnlyMixedBearishOverrideSection
     )
+    synthetic: ShortOnlySyntheticSection = field(default_factory=ShortOnlySyntheticSection)
+    paper_exposure_sizing: ShortOnlyPaperExposureSizingSection = field(
+        default_factory=ShortOnlyPaperExposureSizingSection
+    )
+    upsize: ShortOnlyUpsizeSection = field(default_factory=ShortOnlyUpsizeSection)
+    damage_guard: ShortOnlyDamageGuardSection = field(default_factory=ShortOnlyDamageGuardSection)
     edge: ShortOnlyEdgeSection = field(default_factory=ShortOnlyEdgeSection)
     sizing: ShortOnlySizingSection = field(default_factory=ShortOnlySizingSection)
     microstructure: ShortOnlyMicrostructureSection = field(default_factory=ShortOnlyMicrostructureSection)
@@ -1001,6 +1051,44 @@ def _parse_short_only(payload: dict[str, Any] | None, *, execution_mode: TradeMo
                 raw.get("mixed_bearish_override", {})
                 if isinstance(raw.get("mixed_bearish_override"), dict)
                 else {},
+            ),
+        }
+    )
+    values["synthetic"] = ShortOnlySyntheticSection(
+        **{
+            **default.synthetic.__dict__,
+            **_dataclass_payload(
+                ShortOnlySyntheticSection,
+                raw.get("synthetic", {}) if isinstance(raw.get("synthetic"), dict) else {},
+            ),
+        }
+    )
+    values["paper_exposure_sizing"] = ShortOnlyPaperExposureSizingSection(
+        **{
+            **default.paper_exposure_sizing.__dict__,
+            **_dataclass_payload(
+                ShortOnlyPaperExposureSizingSection,
+                raw.get("paper_exposure_sizing", {})
+                if isinstance(raw.get("paper_exposure_sizing"), dict)
+                else {},
+            ),
+        }
+    )
+    values["upsize"] = ShortOnlyUpsizeSection(
+        **{
+            **default.upsize.__dict__,
+            **_dataclass_payload(
+                ShortOnlyUpsizeSection,
+                raw.get("upsize", {}) if isinstance(raw.get("upsize"), dict) else {},
+            ),
+        }
+    )
+    values["damage_guard"] = ShortOnlyDamageGuardSection(
+        **{
+            **default.damage_guard.__dict__,
+            **_dataclass_payload(
+                ShortOnlyDamageGuardSection,
+                raw.get("damage_guard", {}) if isinstance(raw.get("damage_guard"), dict) else {},
             ),
         }
     )

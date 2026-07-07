@@ -359,22 +359,45 @@ pullback_is_addon_not_required = true
 ml_is_edge_gate_not_blocker = true
 microstructure_is_size_modifier_not_blocker = true
 confirmation_is_size_modifier_not_blocker = true
-strategy_signal_is_optional = true
+strategy_signal_is_optional = false
 allow_synthetic_short_candidates = true
-allow_existing_short_upsize = true
-paper_exposure_sizing_enabled = true
+allow_existing_short_upsize = false
+paper_exposure_sizing_enabled = false
+
+[short_only.synthetic]
+enabled = true
+real_trading_enabled = false
+shadow_only = true
+reason = "disabled_after_0_53_short_only_winners"
+min_shadow_trades_before_reenable = 100
+reenable_requires_positive_expectancy = true
+reenable_requires_profit_factor = 1.15
+
+[short_only.paper_exposure_sizing]
+enabled = false
+reason = "disabled_after_expanded_size_losses"
+
+[short_only.upsize]
+enabled = false
+real_trading_enabled = false
+shadow_only = true
+reason = "disabled_until_strategy_short_baseline_positive"
 
 [short_only.mixed_bearish_override]
 enabled = true
 min_breadth_down = 0.70
 min_confidence = 0.50
 min_symbols = 8
-target_gross_exposure = 1.00
-max_gross_exposure = 1.00
-max_positions = 20
-max_new_shorts_per_cycle = 20
-per_symbol_exposure_target = 0.12
-per_symbol_exposure_max = 0.18
+target_gross_exposure = 0.0
+max_gross_exposure = 0.0
+max_positions = 0
+max_new_shorts_per_cycle = 0
+per_symbol_exposure_target = 0.0
+per_symbol_exposure_max = 0.0
+real_trading_enabled = false
+shadow_only = true
+min_shadow_trades_before_reenable = 100
+reenable_requires_positive_expectancy = true
 
 [short_only.edge]
 min_expected_net_edge_rub = 5.0
@@ -395,7 +418,7 @@ max_positions = 20
 max_new_shorts_per_cycle = 20
 per_symbol_exposure_target = 0.12
 per_symbol_exposure_max = 0.18
-max_risk_quantity_expansion = 3.0
+max_risk_quantity_expansion = 1.0
 
 [short_only.sizing.clean_downtrend]
 target_gross_exposure = 1.00
@@ -404,25 +427,25 @@ max_positions = 20
 max_new_shorts_per_cycle = 20
 per_symbol_exposure_target = 0.12
 per_symbol_exposure_max = 0.18
-max_risk_quantity_expansion = 3.0
+max_risk_quantity_expansion = 1.0
 
 [short_only.sizing.weak_down_choppy]
-target_gross_exposure = 1.00
-max_gross_exposure = 1.00
-max_positions = 20
-max_new_shorts_per_cycle = 20
-per_symbol_exposure_target = 0.12
-per_symbol_exposure_max = 0.18
-max_risk_quantity_expansion = 3.0
+target_gross_exposure = 0.15
+max_gross_exposure = 0.25
+max_positions = 3
+max_new_shorts_per_cycle = 2
+per_symbol_exposure_target = 0.03
+per_symbol_exposure_max = 0.05
+max_risk_quantity_expansion = 1.0
 
 [short_only.sizing.mixed_bearish]
-target_gross_exposure = 1.00
-max_gross_exposure = 1.00
-max_positions = 20
-max_new_shorts_per_cycle = 20
-per_symbol_exposure_target = 0.12
-per_symbol_exposure_max = 0.18
-max_risk_quantity_expansion = 3.0
+target_gross_exposure = 0.0
+max_gross_exposure = 0.0
+max_positions = 0
+max_new_shorts_per_cycle = 0
+per_symbol_exposure_target = 0.0
+per_symbol_exposure_max = 0.0
+max_risk_quantity_expansion = 1.0
 
 [short_only.sizing.range_chop]
 target_gross_exposure = 0.0
@@ -448,16 +471,29 @@ selloff_min_5m_bars = 1
 normal_min_5m_bars = 1
 neutral_5m_multiplier = 0.85
 mild_rebound_multiplier = 0.65
-strong_rebound_action = "reduce_size"
+strong_rebound_action = "no_trade"
 strong_rebound_multiplier = 0.35
 extreme_adverse_action = "no_trade"
 
 [short_only.ml]
 allow_if_expected_net_edge_positive = true
+positive_edge_is_required_but_not_sufficient = true
+ml_positive_standalone_real_trading = false
 negative_edge_action = "no_trade"
-missing_model_action = "price_action_fallback"
+missing_model_action = "no_trade"
 positive_edge_multiplier = 1.0
 weak_positive_edge_multiplier = 0.5
+
+[short_only.damage_guard]
+enabled = true
+daily_loss_limit_rub = 1500.0
+daily_loss_limit_pct = 0.005
+include_open_pnl = true
+action = "block_new_entries"
+allow_exits = true
+allow_position_management = true
+allow_shadow_candidates = true
+reset_next_session = true
 
 [short_only.exits]
 use_existing_atr_stop = true

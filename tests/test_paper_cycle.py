@@ -79,6 +79,22 @@ def _enable_short_only_config(config_path: Path) -> None:
                 "flatten_existing_longs = true",
                 "no_trade_in_range_chop = true",
                 'allow_shorts_only_in_regimes = ["market_selloff_impulse", "clean_downtrend", "weak_down_choppy", "mixed_bearish"]',
+                "strategy_signal_is_optional = false",
+                "allow_existing_short_upsize = false",
+                "paper_exposure_sizing_enabled = false",
+                "",
+                "[short_only.synthetic]",
+                "enabled = true",
+                "real_trading_enabled = false",
+                "shadow_only = true",
+                "",
+                "[short_only.paper_exposure_sizing]",
+                "enabled = false",
+                "",
+                "[short_only.upsize]",
+                "enabled = false",
+                "real_trading_enabled = false",
+                "shadow_only = true",
                 "",
                 "[short_only.edge]",
                 "min_expected_net_edge_rub = 5.0",
@@ -90,7 +106,7 @@ def _enable_short_only_config(config_path: Path) -> None:
                 "max_new_shorts_per_cycle = 20",
                 "per_symbol_exposure_target = 0.12",
                 "per_symbol_exposure_max = 0.18",
-                "max_risk_quantity_expansion = 3.0",
+                "max_risk_quantity_expansion = 1.0",
                 "",
                 "[short_only.sizing.clean_downtrend]",
                 "target_gross_exposure = 1.0",
@@ -99,29 +115,35 @@ def _enable_short_only_config(config_path: Path) -> None:
                 "max_new_shorts_per_cycle = 20",
                 "per_symbol_exposure_target = 0.12",
                 "per_symbol_exposure_max = 0.18",
-                "max_risk_quantity_expansion = 3.0",
+                "max_risk_quantity_expansion = 1.0",
                 "",
                 "[short_only.sizing.weak_down_choppy]",
-                "target_gross_exposure = 1.0",
-                "max_gross_exposure = 1.0",
-                "max_positions = 20",
-                "max_new_shorts_per_cycle = 20",
-                "per_symbol_exposure_target = 0.12",
-                "per_symbol_exposure_max = 0.18",
-                "max_risk_quantity_expansion = 3.0",
+                "target_gross_exposure = 0.15",
+                "max_gross_exposure = 0.25",
+                "max_positions = 3",
+                "max_new_shorts_per_cycle = 2",
+                "per_symbol_exposure_target = 0.03",
+                "per_symbol_exposure_max = 0.05",
+                "max_risk_quantity_expansion = 1.0",
                 "",
                 "[short_only.sizing.mixed_bearish]",
-                "target_gross_exposure = 1.0",
-                "max_gross_exposure = 1.0",
-                "max_positions = 20",
-                "max_new_shorts_per_cycle = 20",
-                "per_symbol_exposure_target = 0.12",
-                "per_symbol_exposure_max = 0.18",
-                "max_risk_quantity_expansion = 3.0",
+                "target_gross_exposure = 0.0",
+                "max_gross_exposure = 0.0",
+                "max_positions = 0",
+                "max_new_shorts_per_cycle = 0",
+                "per_symbol_exposure_target = 0.0",
+                "per_symbol_exposure_max = 0.0",
+                "max_risk_quantity_expansion = 1.0",
                 "",
                 "[short_only.confirmation]",
-                'strong_rebound_action = "reduce_size"',
+                'strong_rebound_action = "no_trade"',
                 "strong_rebound_multiplier = 0.35",
+                "",
+                "[short_only.damage_guard]",
+                "enabled = true",
+                "daily_loss_limit_rub = 1500.0",
+                "daily_loss_limit_pct = 0.005",
+                "include_open_pnl = true",
                 "",
             ]
         ),
@@ -614,7 +636,7 @@ class PaperCycleShortOnlyTest(unittest.TestCase):
             self.assertFalse(signal_event["approved"])
             self.assertIn("expected net edge", signal_event["reason"])
 
-    def test_mixed_bearish_trades_short_selective(self):
+    def test_mixed_bearish_real_trading_disabled(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             config_path = _write_basic_paper_config(root)
@@ -634,8 +656,10 @@ class PaperCycleShortOnlyTest(unittest.TestCase):
             signal_event = next(event for event in cycle_events if event.get("action") == "signal")
 
             self.assertIn("short_only_mixed_bearish_override", [event["action"] for event in cycle_events])
+            self.assertIn("short_only_mixed_bearish_shadow_only", [event["action"] for event in cycle_events])
             self.assertEqual(signal_event["metadata"]["short_only"]["effective_regime"], "mixed_bearish")
-            self.assertTrue(signal_event["approved"])
+            self.assertFalse(signal_event["approved"])
+            self.assertIn("mixed_bearish real trading disabled", signal_event["reason"])
 
     def test_mixed_non_bearish_remains_no_trade(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -657,7 +681,7 @@ class PaperCycleShortOnlyTest(unittest.TestCase):
             self.assertIn("short_only_no_trade_regime", [event["action"] for event in cycle_events])
             self.assertFalse(any(event.get("action") == "signal" and event.get("approved") for event in cycle_events))
 
-    def test_strategy_missing_still_can_create_synthetic_short_candidate(self):
+    def test_strategy_missing_short_signal_creates_shadow_only(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             config_path = _write_basic_paper_config(root)
@@ -676,10 +700,13 @@ class PaperCycleShortOnlyTest(unittest.TestCase):
             )["events"]
             candidate = next(event for event in cycle_events if event.get("action") == "short_only_short_candidate")
             signal_event = next(event for event in cycle_events if event.get("action") == "signal")
+            shadow_event = next(event for event in cycle_events if event.get("action") == "short_only_synthetic_shadow_only")
 
             self.assertTrue(candidate["metadata"]["short_only"]["synthetic_candidate"])
             self.assertEqual(candidate["metadata"]["short_only"]["synthetic_reason"], "strategy_missing_short_signal")
-            self.assertTrue(signal_event["approved"])
+            self.assertFalse(signal_event["approved"])
+            self.assertEqual(shadow_event["metadata"]["short_only"]["synthetic_disabled_by_loss_diagnostics"], True)
+            self.assertTrue(shadow_event["metadata"]["short_only"]["shadow_only"])
 
     def test_strategy_long_signal_can_create_synthetic_short_candidate_in_bearish_regime(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -699,12 +726,15 @@ class PaperCycleShortOnlyTest(unittest.TestCase):
                 (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
             )["events"]
             candidate = next(event for event in cycle_events if event.get("action") == "short_only_short_candidate")
+            signal_event = next(event for event in cycle_events if event.get("action") == "signal")
 
             self.assertIn("long_signal_ignored_short_only", [event["action"] for event in cycle_events])
+            self.assertIn("short_only_synthetic_shadow_only", [event["action"] for event in cycle_events])
             self.assertTrue(candidate["metadata"]["short_only"]["synthetic_candidate"])
             self.assertEqual(candidate["metadata"]["short_only"]["source_strategy_signal"], "long")
+            self.assertFalse(signal_event["approved"])
 
-    def test_positive_ev_short_not_blocked_by_strong_rebound(self):
+    def test_strong_rebound_blocks_real_short(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             config_path = _write_basic_paper_config(
@@ -736,9 +766,10 @@ class PaperCycleShortOnlyTest(unittest.TestCase):
             )["events"]
             signal_event = next(event for event in cycle_events if event.get("action") == "signal")
 
-            self.assertTrue(signal_event["approved"])
+            self.assertIn("short_only_strong_rebound_shadow_only", [event["action"] for event in cycle_events])
+            self.assertFalse(signal_event["approved"])
             self.assertEqual(signal_event["metadata"]["short_only"]["confirmation_status"], "strong_rebound")
-            self.assertLess(signal_event["metadata"]["short_only"]["confirmation_multiplier"], 1.0)
+            self.assertIn("strong rebound", signal_event["reason"])
 
     def test_extreme_adverse_confirmation_still_blocks(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -829,7 +860,7 @@ class PaperCycleShortOnlyTest(unittest.TestCase):
             self.assertFalse(signal_event["approved"])
             self.assertIn("extreme spread", signal_event["reason"])
 
-    def test_paper_exposure_sizing_can_expand_above_risk_quantity(self):
+    def test_paper_exposure_sizing_disabled(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             config_path = _write_basic_paper_config(root)
@@ -851,10 +882,34 @@ class PaperCycleShortOnlyTest(unittest.TestCase):
             short_only = signal_event["metadata"]["short_only"]
 
             self.assertTrue(signal_event["approved"])
-            self.assertTrue(short_only["paper_exposure_sizing_enabled"])
-            self.assertGreaterEqual(short_only["expansion_factor_used"], 1.0)
+            self.assertFalse(short_only["paper_exposure_sizing_enabled"])
+            self.assertLessEqual(short_only["final_quantity_lots"], short_only["risk_after_multiplier_lots"])
+            self.assertLessEqual(short_only["expansion_factor_used"], 1.0)
 
-    def test_existing_short_can_upsize_when_budget_underallocated(self):
+    def test_no_one_lot_fallback_when_paper_exposure_sizing_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            _enable_short_only_config(config_path)
+            config = load_config(config_path)
+            config = replace(config, risk=replace(config.risk, max_risk_per_trade=0.000001))
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            candles = _bearish_candles()
+            orchestrator = _PositiveMlShortCycleOrchestrator(config, _FakeProvider([instrument], {"SBER": candles}))
+            regime = MarketRegime("market_selloff_impulse", 0.90, {"breadth_down": 0.95, "symbols": 35})
+
+            with patch("samosbor.orchestrator.detect_market_regime", return_value=regime):
+                result = orchestrator.run_paper_cycle()
+
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+            signal_event = next(event for event in cycle_events if event.get("action") == "signal")
+
+            self.assertFalse(signal_event["approved"])
+            self.assertIn("allocation produced < 1 lot", signal_event["reason"])
+
+    def test_existing_short_not_upsized_when_disabled(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             config_path = _write_basic_paper_config(root)
@@ -900,8 +955,68 @@ class PaperCycleShortOnlyTest(unittest.TestCase):
                 commission_bps=config.execution.commission_bps,
             )
 
-            self.assertIn("short_only_upsize_opened", [event["action"] for event in cycle_events])
-            self.assertGreater(state.portfolio.positions["SBER"].quantity_lots, 1)
+            self.assertIn("short_only_upsize_shadow_only", [event["action"] for event in cycle_events])
+            self.assertNotIn("short_only_upsize_opened", [event["action"] for event in cycle_events])
+            self.assertEqual(state.portfolio.positions["SBER"].quantity_lots, 1)
+
+    def test_damage_guard_blocks_new_real_entries(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            _enable_short_only_config(config_path)
+            config = load_config(config_path)
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            state_path = config.resolve_path(config.execution.state_path)
+            broker = LocalPaperBroker.load(
+                state_path,
+                initial_cash=config.backtest.initial_cash,
+                slippage_bps=config.execution.slippage_bps,
+                commission_bps=config.execution.commission_bps,
+            )
+            opened_at = datetime(2026, 7, 7, 9, 30, tzinfo=timezone.utc)
+            broker.open_position(
+                Signal(
+                    instrument=instrument,
+                    direction=SignalDirection.SHORT,
+                    strength=0.8,
+                    entry_price=100.0,
+                    stop_price=103.0,
+                    take_profit=94.0,
+                    reason="seed-short-loss",
+                ),
+                600,
+                opened_at,
+            )
+            broker.close_position(
+                "SBER",
+                price=103.0,
+                timestamp=datetime(2026, 7, 7, 10, 0, tzinfo=timezone.utc),
+                reason=ExitReason.STOP_LOSS,
+            )
+            broker.save(state_path)
+            candles = _bearish_candles()
+            orchestrator = _PositiveMlShortCycleOrchestrator(config, _FakeProvider([instrument], {"SBER": candles}))
+            regime = MarketRegime("market_selloff_impulse", 0.90, {"breadth_down": 0.95, "symbols": 35})
+
+            with patch("samosbor.orchestrator.detect_market_regime", return_value=regime):
+                result = orchestrator.run_paper_cycle()
+
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+            state = LocalPaperBroker.load(
+                state_path,
+                initial_cash=config.backtest.initial_cash,
+                slippage_bps=config.execution.slippage_bps,
+                commission_bps=config.execution.commission_bps,
+            )
+            signal_event = next(event for event in cycle_events if event.get("action") == "signal")
+
+            self.assertIn("short_only_damage_guard_triggered", [event["action"] for event in cycle_events])
+            self.assertIn("short_only_shadow_only", [event["action"] for event in cycle_events])
+            self.assertFalse(signal_event["approved"])
+            self.assertIn("damage guard", signal_event["reason"])
+            self.assertEqual(state.portfolio.positions, {})
 
 
 class PaperCycleSessionFlatTest(unittest.TestCase):

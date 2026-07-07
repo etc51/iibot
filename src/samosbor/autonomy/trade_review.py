@@ -1305,10 +1305,16 @@ def _short_only_review(
         "average_expected_edge": round(sum(expected_edges) / len(expected_edges), 2) if expected_edges else 0.0,
         "realized_pnl_short_only": _pnl_for_reviews(short_only_reviews),
         "open_pnl_short_only": round(sum(position.unrealized_pnl(position.current_price) for position in open_short_only_positions), 2),
+        "source_validation": _short_only_source_validation(short_only_reviews, events),
+        "disabled_sources": _short_only_disabled_sources(events),
+        "pnl_by_source": _pnl_by_short_only_source(short_only_reviews),
         "pnl_by_regime": _group_breakdown(short_only_reviews, "market_regime") if short_only_reviews else [],
         "pnl_by_effective_regime": _pnl_by_short_only_metadata_key(short_only_reviews, "effective_regime"),
         "pnl_by_edge_source": _pnl_by_short_only_metadata_key(short_only_reviews, "edge_source"),
         "pnl_by_edge_bucket": _pnl_by_short_only_edge_bucket(short_only_reviews),
+        "pnl_by_confirmation": _pnl_by_short_only_metadata_key(short_only_reviews, "confirmation_status"),
+        "pnl_by_expansion": _pnl_by_short_only_expansion_bucket(short_only_reviews),
+        "pnl_by_synthetic_reason": _pnl_by_short_only_metadata_key(short_only_reviews, "synthetic_reason"),
         "budget_target": latest_budget.get("budget_target_gross_rub", 0.0),
         "budget_used": latest_budget.get("budget_used_gross_rub", 0.0),
         "budget_target_gross": latest_budget.get("budget_target_gross_rub", 0.0),
@@ -1913,6 +1919,168 @@ def _pnl_by_short_only_metadata_key(reviews: list[dict[str, object]], key: str) 
         )
         for bucket in buckets
     }
+
+
+def _pnl_by_short_only_source(reviews: list[dict[str, object]]) -> dict[str, object]:
+    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for review in reviews:
+        grouped[_short_only_review_source(review)].append(review)
+    return {source: _pnl_for_reviews(items) for source, items in sorted(grouped.items())}
+
+
+def _pnl_by_short_only_expansion_bucket(reviews: list[dict[str, object]]) -> dict[str, object]:
+    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for review in reviews:
+        short_only = review.get("entry_metadata", {}).get("short_only", {})
+        if not isinstance(short_only, dict):
+            grouped["unknown"].append(review)
+            continue
+        expansion = _safe_float(short_only.get("expansion_factor_used"), default=0.0)
+        if expansion >= 2.0:
+            bucket = ">=2.0x"
+        elif expansion >= 1.2:
+            bucket = "1.2-2.0x"
+        elif expansion >= 0.8:
+            bucket = "0.8-1.2x"
+        elif expansion > 0.0:
+            bucket = "<0.8x"
+        else:
+            bucket = "unknown"
+        grouped[bucket].append(review)
+    return {bucket: _pnl_for_reviews(items) for bucket, items in sorted(grouped.items())}
+
+
+def _short_only_source_validation(
+    reviews: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    groups = {
+        "strategy_short_real": [
+            review for review in reviews if _short_only_review_source(review) == "strategy_short"
+        ],
+        "synthetic_shadow": [
+            event for event in events if event.get("action") == "short_only_synthetic_shadow_only"
+        ],
+        "ml_only_shadow": [
+            event
+            for event in events
+            if event.get("action") == "short_only_synthetic_shadow_only"
+            and _event_short_only(event).get("edge_source") == "ml"
+        ],
+        "mixed_bearish_shadow": [
+            event for event in events if event.get("action") == "short_only_mixed_bearish_shadow_only"
+        ],
+        "upsize_shadow": [
+            event for event in events if event.get("action") == "short_only_upsize_shadow_only"
+        ],
+    }
+    return {
+        "strategy_short_real": _source_validation_real_row(groups["strategy_short_real"]),
+        "synthetic_shadow": _source_validation_shadow_row(groups["synthetic_shadow"]),
+        "ml_only_shadow": _source_validation_shadow_row(groups["ml_only_shadow"]),
+        "mixed_bearish_shadow": _source_validation_shadow_row(groups["mixed_bearish_shadow"]),
+        "upsize_shadow": _source_validation_shadow_row(groups["upsize_shadow"]),
+    }
+
+
+def _short_only_disabled_sources(events: list[dict[str, object]]) -> list[dict[str, object]]:
+    event_counts = Counter(str(event.get("action", "")) for event in events)
+    return [
+        {
+            "source": "synthetic",
+            "real_trading_enabled": False,
+            "shadow_only": True,
+            "reason": "disabled_after_0_53_short_only_winners",
+            "criteria_to_reenable": ">=100 shadow trades, positive expectancy, profit factor >= 1.15",
+            "shadow_events": event_counts.get("short_only_synthetic_shadow_only", 0),
+        },
+        {
+            "source": "upsize",
+            "real_trading_enabled": False,
+            "shadow_only": True,
+            "reason": "disabled_until_strategy_short_baseline_positive",
+            "criteria_to_reenable": "strategy_short baseline positive first",
+            "shadow_events": event_counts.get("short_only_upsize_shadow_only", 0),
+        },
+        {
+            "source": "mixed_bearish",
+            "real_trading_enabled": False,
+            "shadow_only": True,
+            "reason": "mixed_bearish_not_proven",
+            "criteria_to_reenable": ">=100 shadow trades and positive expectancy",
+            "shadow_events": event_counts.get("short_only_mixed_bearish_shadow_only", 0),
+        },
+        {
+            "source": "paper_exposure_sizing",
+            "real_trading_enabled": False,
+            "shadow_only": False,
+            "reason": "disabled_after_expanded_size_losses",
+            "criteria_to_reenable": "short_only realized cohort positive with no expansion",
+            "shadow_events": 0,
+        },
+    ]
+
+
+def _source_validation_real_row(reviews: list[dict[str, object]]) -> dict[str, object]:
+    pnl_values = [_safe_float(review.get("net_pnl_rub"), default=0.0) for review in reviews]
+    wins = [value for value in pnl_values if value > 0]
+    losses = [value for value in pnl_values if value < 0]
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
+    return {
+        **_pnl_for_reviews(reviews),
+        "profit_factor": round(profit_factor, 3) if profit_factor is not None and math.isfinite(profit_factor) else profit_factor,
+        "average_mfe_r": _avg_review_float(reviews, "mfe_r"),
+        "average_mae_r": _avg_review_float(reviews, "mae_r"),
+    }
+
+
+def _source_validation_shadow_row(events: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "count": len(events),
+        "shadow_pnl": {"available": False, "reason": "shadow exits are not resolved as trades"},
+        "expectancy_rub": None,
+        "win_rate_pct": None,
+        "profit_factor": None,
+        "average_mfe_r": None,
+        "average_mae_r": None,
+    }
+
+
+def _short_only_review_source(review: dict[str, object]) -> str:
+    metadata = review.get("entry_metadata", {})
+    short_only = metadata.get("short_only", {}) if isinstance(metadata, dict) else {}
+    if not isinstance(short_only, dict):
+        return "unknown"
+    if bool(short_only.get("is_upsize", False)):
+        return "upsize"
+    if bool(short_only.get("synthetic_candidate", False)):
+        return "synthetic"
+    if str(short_only.get("source_strategy_signal", "")) == "short":
+        return "strategy_short"
+    return str(short_only.get("real_trade_source", "strategy_short") or "strategy_short")
+
+
+def _avg_review_float(reviews: list[dict[str, object]], key: str) -> float | None:
+    values = [
+        _safe_float(review.get(key), default=None)
+        for review in reviews
+        if _safe_float(review.get(key), default=None) is not None
+    ]
+    if not values:
+        return None
+    return round(sum(values) / len(values), 3)
+
+
+def _safe_float(value: object, *, default: float | None = 0.0) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return number
 
 
 def _latest_market_regime(events: list[dict[str, object]]) -> str:
