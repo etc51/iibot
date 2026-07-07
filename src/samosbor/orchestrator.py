@@ -3409,9 +3409,19 @@ class TradingOrchestrator:
             primary_history,
             timeframe=timeframe,
             label="golden execution guard",
+            history_days=1,
         )
 
-    def _load_history_for_timeframe(self, provider, instruments, primary_history, *, timeframe: str, label: str):
+    def _load_history_for_timeframe(
+        self,
+        provider,
+        instruments,
+        primary_history,
+        *,
+        timeframe: str,
+        label: str,
+        history_days: int | None = None,
+    ):
         timeframe = timeframe.strip()
         forbidden = {str(value).strip().lower() for value in self.config.golden_baseline.forbidden_timeframes}
         if bool(self.config.golden_baseline.enabled) and timeframe.lower() in forbidden:
@@ -3421,6 +3431,12 @@ class TradingOrchestrator:
             return primary_history
         if hasattr(provider, "load_history_for_timeframe"):
             try:
+                if history_days is not None:
+                    return provider.load_history_for_timeframe(instruments, timeframe, history_days=history_days)
+                return provider.load_history_for_timeframe(instruments, timeframe)
+            except TypeError as exc:
+                if history_days is None or "history_days" not in str(exc):
+                    raise
                 return provider.load_history_for_timeframe(instruments, timeframe)
             except Exception as exc:  # pragma: no cover - live API dependent
                 LOGGER.warning("%s history failed for %s: %s", label, timeframe, exc)

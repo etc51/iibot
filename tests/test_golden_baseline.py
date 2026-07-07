@@ -11,6 +11,7 @@ from samosbor.autonomy.golden_baseline import (
 from samosbor.autonomy.trade_review import build_trade_review_payload
 from samosbor.config import load_config
 from samosbor.domain import Candle, Instrument, InstrumentType, PortfolioState, Signal, SignalDirection, TradeRecord
+from samosbor.orchestrator import TradingOrchestrator
 
 
 class _Regime:
@@ -260,6 +261,26 @@ def test_focused_config_declares_golden_3tf_runtime_profile():
     assert config.short_only.real_trade_sources.strategy_short is True
     assert config.short_only.real_trade_sources.early_5m_starter is True
     assert config.short_only.real_trade_sources.synthetic is False
+
+
+def test_execution_guard_loader_uses_one_day_1m_history(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    instrument = Instrument("SBER", InstrumentType.STOCK)
+
+    class Provider:
+        def __init__(self):
+            self.calls: list[tuple[str, int | None]] = []
+
+        def load_history_for_timeframe(self, instruments, timeframe: str, *, history_days: int | None = None):
+            self.calls.append((timeframe, history_days))
+            return {instrument.symbol: [] for instrument in instruments}
+
+    provider = Provider()
+    orchestrator = TradingOrchestrator(config)
+
+    orchestrator._load_golden_execution_guard_history(provider, [instrument], {})
+
+    assert provider.calls == [("1min", 1)]
 
 
 def test_trade_review_reports_golden_3tf_counts(tmp_path: Path):

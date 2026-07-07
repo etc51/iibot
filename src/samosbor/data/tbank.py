@@ -292,17 +292,24 @@ class TBankMarketDataProvider:
         self,
         instruments: list[Instrument],
         timeframe: str,
+        *,
+        history_days: int | None = None,
     ) -> dict[str, list[Candle]]:
         resolved = self.resolve_universe(instruments)
+        requested_days = (
+            max(1, int(history_days))
+            if history_days is not None
+            else _secondary_timeframe_history_days(
+                primary_timeframe=self.config.data.timeframe,
+                secondary_timeframe=timeframe,
+                configured_days=self.config.data.history_days,
+            )
+        )
         return {
             instrument.symbol: self.get_candles(
                 instrument,
                 timeframe=timeframe,
-                history_days=_secondary_timeframe_history_days(
-                    primary_timeframe=self.config.data.timeframe,
-                    secondary_timeframe=timeframe,
-                    configured_days=self.config.data.history_days,
-                ),
+                history_days=requested_days,
             )
             for instrument in resolved
         }
