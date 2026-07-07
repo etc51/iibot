@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from .autonomy.trade_review import trade_review_path
 from .config import load_config
@@ -43,13 +44,18 @@ def build_minimal_dashboard_payload(config_path: str | Path) -> dict[str, object
     live_prices, market_data_error = _live_price_marks(config, portfolio)
     positions = _positions_from_state(portfolio, live_prices=live_prices)
     trades = _dashboard_trades(list(state.get("trades", []))[-10:])
+    daily_trades = _daily_closed_trade_summary(
+        list(state.get("trades", [])),
+        timezone_name=config.app.timezone,
+    )
     closed_trades_count = len(list(state.get("trades", [])))
     events = list(state.get("events", []))[-20:]
     equity = _portfolio_equity(portfolio, positions)
     cash = float(portfolio.get("cash", latest_cycle.get("cash_rub", 0.0)))
     exposure = _gross_exposure(positions)
     daily_target = float(config.research.target_daily_profit_rub)
-    realized = float(portfolio.get("realized_pnl", 0.0))
+    cumulative_realized = float(portfolio.get("realized_pnl", 0.0))
+    daily_realized = float(daily_trades["net_pnl_rub"])
     open_pnl = sum(float(position.get("unrealized_pnl_rub", 0.0)) for position in positions)
 
     return {
@@ -73,16 +79,21 @@ def build_minimal_dashboard_payload(config_path: str | Path) -> dict[str, object
             "equity_rub": round(equity, 2),
             "cash_rub": round(cash, 2),
             "gross_exposure_rub": round(exposure, 2),
-            "realized_pnl_rub": round(realized, 2),
+            "realized_pnl_rub": round(daily_realized, 2),
+            "daily_realized_pnl_rub": round(daily_realized, 2),
+            "cumulative_realized_pnl_rub": round(cumulative_realized, 2),
             "open_pnl_rub": round(open_pnl, 2),
             "open_positions": len(positions),
             "closed_positions": closed_trades_count,
+            "daily_closed_positions": int(daily_trades["trades"]),
+            "daily_wins": int(daily_trades["wins"]),
+            "daily_losses": int(daily_trades["losses"]),
             "trading_halted": bool(portfolio.get("trading_halted", False)),
         },
         "latest_cycle": latest_cycle,
         "target": {
             "daily_rub": daily_target,
-            "progress_pct": round(realized / daily_target * 100, 2) if daily_target else 0.0,
+            "progress_pct": round(daily_realized / daily_target * 100, 2) if daily_target else 0.0,
         },
         "positions": positions,
         "recent_trades": trades,
@@ -120,6 +131,9 @@ def render_minimal_dashboard_html(payload: dict[str, object]) -> str:
     mistakes_html = _kv_table(dict(trade_review.get("mistake_breakdown", {})), "No mistakes yet")
     recommendations_html = _recommendations(list(trade_review.get("recommendations", [])))
     log_html = "\n".join(_escape(line) for line in list(payload["log_tail"]))
+    daily_realized = float(account.get("daily_realized_pnl_rub", account.get("realized_pnl_rub", 0.0)))
+    cumulative_realized = float(account.get("cumulative_realized_pnl_rub", 0.0))
+    daily_realized_hint = f"target {target.get('progress_pct', 0)}% | total {_money(cumulative_realized)}"
 
     return f"""<!doctype html>
 <html lang="en">
@@ -211,7 +225,7 @@ def render_minimal_dashboard_html(payload: dict[str, object]) -> str:
     {_metric("Equity", _money(account.get("equity_rub", 0)), _fmt_time(str(latest_cycle.get("timestamp", ""))))}
     {_metric("Open / Closed", f"{account.get('open_positions', 0)} / {account.get('closed_positions', 0)}", "positions count")}
     {_metric("Open PnL", _money(account.get("open_pnl_rub", 0)), "unrealized", _tone(float(account.get("open_pnl_rub", 0))))}
-    {_metric("Realized PnL", _money(account.get("realized_pnl_rub", 0)), f"target {target.get('progress_pct', 0)}%", _tone(float(account.get("realized_pnl_rub", 0))))}
+    {_metric("Daily Realized", _money(daily_realized), daily_realized_hint, _tone(daily_realized))}
 
     <section class="wide">
       <h2>Open Positions</h2>
@@ -404,6 +418,43 @@ def _dashboard_trades(rows: list[object]) -> list[dict[str, object]]:
             trade["reason"] = display_reason
         result.append(trade)
     return result
+
+
+def _daily_closed_trade_summary(
+    rows: list[object],
+    *,
+    timezone_name: str,
+    now: datetime | None = None,
+) -> dict[str, float | int | str]:
+    timezone_info = ZoneInfo(timezone_name)
+    anchor = (now or datetime.now(timezone.utc)).astimezone(timezone_info).date()
+    trades = 0
+    wins = 0
+    losses = 0
+    net_pnl = 0.0
+    gross_pnl = 0.0
+    for item in rows:
+        trade = dict(item)
+        exit_time = _parse_datetime(str(trade.get("exit_time", "")))
+        if exit_time is None or exit_time.astimezone(timezone_info).date() != anchor:
+            continue
+        trades += 1
+        net = float(trade.get("net_pnl", 0.0))
+        gross = float(trade.get("gross_pnl", 0.0))
+        net_pnl += net
+        gross_pnl += gross
+        if net > 0:
+            wins += 1
+        elif net < 0:
+            losses += 1
+    return {
+        "date": anchor.isoformat(),
+        "trades": trades,
+        "wins": wins,
+        "losses": losses,
+        "net_pnl_rub": round(net_pnl, 2),
+        "gross_pnl_rub": round(gross_pnl, 2),
+    }
 
 
 def _display_exit_reason(trade: dict[str, object], *, pnl: float | None = None) -> str:
@@ -667,11 +718,17 @@ def _tone(value: float) -> str:
 def _fmt_time(value: str) -> str:
     if not value:
         return "-"
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+    parsed = _parse_datetime(value)
+    if parsed is None:
         return value
     return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _escape(value: str) -> str:

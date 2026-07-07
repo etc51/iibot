@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from samosbor.minimal_dashboard import (
     _dashboard_trades,
     _display_exit_reason,
+    _daily_closed_trade_summary,
     _gross_exposure,
     _portfolio_equity,
     _positions_from_state,
@@ -85,6 +88,39 @@ def test_dashboard_equity_and_exposure_use_units_and_short_sign():
     assert _portfolio_equity(_portfolio(), positions) == 302_209.77
 
 
+def test_daily_closed_trade_summary_uses_moscow_exit_date():
+    rows = [
+        {
+            "exit_time": "2026-07-06T20:59:00+00:00",
+            "net_pnl": 1000.0,
+            "gross_pnl": 1005.0,
+        },
+        {
+            "exit_time": "2026-07-07T06:00:00+00:00",
+            "net_pnl": -50.0,
+            "gross_pnl": -45.0,
+        },
+        {
+            "exit_time": "2026-07-07T09:00:00+00:00",
+            "net_pnl": 20.0,
+            "gross_pnl": 25.0,
+        },
+    ]
+
+    summary = _daily_closed_trade_summary(
+        rows,
+        timezone_name="Europe/Moscow",
+        now=datetime(2026, 7, 7, 12, 30, tzinfo=timezone.utc),
+    )
+
+    assert summary["date"] == "2026-07-07"
+    assert summary["trades"] == 2
+    assert summary["wins"] == 1
+    assert summary["losses"] == 1
+    assert summary["net_pnl_rub"] == -30.0
+    assert summary["gross_pnl_rub"] == -20.0
+
+
 def test_recent_trades_display_positive_stop_loss_as_profit_protection():
     trade = {
         "symbol": "X5",
@@ -131,14 +167,16 @@ def test_trade_review_commit_hash_is_rendered():
             "equity_rub": 100000.0,
             "cash_rub": 100000.0,
             "gross_exposure_rub": 0.0,
-            "realized_pnl_rub": 0.0,
+            "realized_pnl_rub": -30.0,
+            "daily_realized_pnl_rub": -30.0,
+            "cumulative_realized_pnl_rub": 1909.67,
             "open_pnl_rub": 0.0,
             "open_positions": 0,
             "closed_positions": 0,
             "trading_halted": False,
         },
         "latest_cycle": {},
-        "target": {"daily_rub": 1000.0, "progress_pct": 0.0},
+        "target": {"daily_rub": 1000.0, "progress_pct": -3.0},
         "positions": [],
         "recent_trades": [],
         "recent_events": [],
@@ -157,3 +195,6 @@ def test_trade_review_commit_hash_is_rendered():
     html = render_minimal_dashboard_html(payload)
 
     assert "commit 9ae34114961e" in html
+    assert "Daily Realized" in html
+    assert "-30.00 RUB" in html
+    assert "target -3.0% | total 1 909.67 RUB" in html
