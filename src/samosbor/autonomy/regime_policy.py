@@ -353,7 +353,7 @@ def _resolve_relaxed(
         hard_issues.append("missing-order-book")
         tags.append("technical-execution-issue")
 
-    micro = _microstructure_assessment(book)
+    micro = _microstructure_assessment(book, regime=regime, config=config)
     if micro["hard_issue"]:
         hard_issues.append(str(micro["hard_issue"]))
     for issue in micro["soft_issues"]:
@@ -365,6 +365,7 @@ def _resolve_relaxed(
     confirmation_result = _confirmation_assessment(
         confirmation,
         side=normalized_side,
+        regime=regime,
         config=config,
     )
     if confirmation_result["hard_issue"]:
@@ -445,6 +446,32 @@ def _resolve_relaxed(
         if long_decision["final_multiplier"] is not None:
             final_multiplier_override = float(long_decision["final_multiplier"])
             components["long_regime_policy"] = final_multiplier_override
+    elif regime == "market_selloff_impulse":
+        if normalized_side == SignalDirection.SHORT.value:
+            short_decision = _market_selloff_short_decision(
+                signal_strength=signal_strength,
+                requested_mode=requested_mode,
+                confirmation_result=confirmation_result,
+                micro_bucket=str(micro["bucket"]),
+                current_soft_issues=len(soft_issues),
+                symbol_health=symbol_health,
+                ml_negative_edge=ml_negative_edge,
+                config=config,
+                strict_policy=strict_policy,
+            )
+            soft_issues.extend([str(issue) for issue in short_decision["soft_issues"]])
+            tags.extend([str(tag) for tag in short_decision["tags"]])
+            entry_mode_out = str(short_decision["entry_mode"])
+            policy_flags.update(dict(short_decision["policy_flags"]))
+            if bool(short_decision["force_wait_pullback"]):
+                force_wait_pullback = True
+            if bool(short_decision["force_shadow_only"]):
+                force_shadow_only = True
+            if short_decision["decision_type"]:
+                decision_type_override = str(short_decision["decision_type"])
+            if short_decision["final_multiplier"] is not None:
+                final_multiplier_override = float(short_decision["final_multiplier"])
+                components["market_selloff_impulse"] = final_multiplier_override
     elif regime == "weak_down_choppy":
         if normalized_side == SignalDirection.SHORT.value and requested_mode == "pullback_short":
             multipliers.append(("regime", 0.5))
@@ -648,6 +675,119 @@ def _resolve_relaxed(
     )
 
 
+def _market_selloff_short_decision(
+    *,
+    signal_strength: float | None,
+    requested_mode: str,
+    confirmation_result: dict[str, object],
+    micro_bucket: str,
+    current_soft_issues: int,
+    symbol_health: str,
+    ml_negative_edge: bool,
+    config: object | None,
+    strict_policy: TradePolicy,
+) -> dict[str, object]:
+    status = str(confirmation_result.get("status", ""))
+    base_flags = {
+        "selloff_policy_override_applied": True,
+        "do_not_wait_for_pullback_in_broad_selloff": bool(
+            getattr(
+                getattr(config, "paper_alpha_capture", None),
+                "do_not_wait_for_pullback_in_broad_selloff",
+                True,
+            )
+        ),
+        "would_have_waited_pullback_strict": strict_policy.strict_policy_decision == "wait",
+    }
+    if bool(confirmation_result.get("wait_pullback")):
+        return {
+            "decision_type": "",
+            "entry_mode": "wait",
+            "final_multiplier": None,
+            "force_wait_pullback": True,
+            "force_shadow_only": False,
+            "soft_issues": ["selloff-strong-rebound-stop-chase"],
+            "tags": ["selloff-wait-pullback", "stop-chase"],
+            "policy_flags": {**base_flags, "selloff_wait_pullback_selected": True},
+        }
+    if status.startswith("extreme_"):
+        return {
+            "decision_type": PolicyDecisionType.SHADOW_ONLY.value,
+            "entry_mode": "selloff_extreme_rebound_shadow_short",
+            "final_multiplier": 0.0,
+            "force_wait_pullback": False,
+            "force_shadow_only": True,
+            "soft_issues": ["selloff-extreme-adverse-confirmation"],
+            "tags": ["selloff-shadow-only"],
+            "policy_flags": {**base_flags, "selloff_wait_pullback_selected": False},
+        }
+
+    signal_value = float(signal_strength or 0.0)
+    risk_cfg = getattr(getattr(config, "market_selloff_impulse", None), "risk", None)
+    if requested_mode == "pullback_short":
+        entry_mode = "post_selloff_failed_rebound_short"
+        decision_type = PolicyDecisionType.PROBE_TRADE.value
+        multiplier = float(getattr(risk_cfg, "post_selloff_failed_rebound_short_multiplier", 0.35))
+        issue = "market-selloff-post-rebound-short"
+        tag = "selloff-failed-rebound-short"
+    elif micro_bucket == "exploration" or current_soft_issues >= 5 or signal_value < 0.15:
+        entry_mode = "panic_probe_short"
+        decision_type = PolicyDecisionType.EXPLORATION_TRADE.value
+        multiplier = float(getattr(risk_cfg, "panic_probe_short_multiplier", 0.25))
+        issue = "market-selloff-panic-probe-short"
+        tag = "selloff-panic-probe-short"
+    elif signal_value >= 0.30 and micro_bucket in {"normal", "unknown", "unavailable"} and current_soft_issues <= 2:
+        entry_mode = "market_breakdown_short"
+        decision_type = PolicyDecisionType.NORMAL_TRADE.value
+        multiplier = float(getattr(risk_cfg, "market_breakdown_short_multiplier", 0.60))
+        issue = "market-selloff-breakdown-short"
+        tag = "selloff-breakdown-short"
+    else:
+        entry_mode = "selloff_momentum_short"
+        decision_type = PolicyDecisionType.PROBE_TRADE.value
+        multiplier = float(getattr(risk_cfg, "selloff_momentum_short_multiplier", 0.45))
+        issue = "market-selloff-momentum-short"
+        tag = "selloff-momentum-short"
+
+    soft_issues = [issue]
+    tags = [tag, "selloff-short-now", "strict-wait-overridden"]
+    if status == "neutral":
+        multiplier *= 0.85
+        soft_issues.append("selloff-neutral-5m-reduced-short")
+    elif status.startswith("mild_"):
+        multiplier *= 0.75
+        soft_issues.append("selloff-mild-rebound-reduced-short")
+    if symbol_health == "probation":
+        multiplier *= 0.75
+    elif symbol_health in {"weak", "observe_only"}:
+        multiplier *= 0.50
+    if ml_negative_edge:
+        if current_soft_issues <= 1:
+            multiplier *= 0.50
+            soft_issues.append("selloff-ml-negative-edge-reduced")
+        else:
+            multiplier *= 0.35
+            soft_issues.append("selloff-ml-negative-edge-plus-soft-reduced")
+            decision_type = PolicyDecisionType.EXPLORATION_TRADE.value
+        tags.append("selloff-ml-size-reduced")
+
+    return {
+        "decision_type": decision_type,
+        "entry_mode": entry_mode,
+        "final_multiplier": round(max(0.0, min(1.0, multiplier)), 6),
+        "force_wait_pullback": False,
+        "force_shadow_only": False,
+        "soft_issues": soft_issues,
+        "tags": tags,
+        "policy_flags": {
+            **base_flags,
+            "selloff_direct_short_selected": True,
+            "selloff_entry_mode": entry_mode,
+            "strict_wait_overridden_by_relaxed_probe": strict_policy.strict_policy_decision == "wait",
+        },
+    }
+
+
 def _weak_down_choppy_short_decision(
     *,
     signal_strength: float | None,
@@ -698,6 +838,7 @@ def _weak_down_choppy_short_decision(
     probe_min = _weak_choppy_value(config, "short_direct_probe_min_signal_strength", 0.20)
     exploration_min = _weak_choppy_value(config, "short_direct_exploration_min_signal_strength", 0.12)
     max_soft = int(_weak_choppy_value(config, "short_direct_probe_max_soft_issues", 4))
+    allow_ml_exploration = bool(_weak_choppy_value(config, "allow_ml_negative_edge_exploration", True))
     book_ok = micro_bucket in {"normal", "probe", "exploration", "unknown", "unavailable"}
     can_probe = (
         probe_enabled
@@ -706,7 +847,12 @@ def _weak_down_choppy_short_decision(
         and signal_value >= probe_min
         and current_soft_issues <= max_soft
     )
-    can_explore = exploration_enabled and book_ok and signal_value >= exploration_min
+    can_explore = (
+        exploration_enabled
+        and book_ok
+        and (allow_ml_exploration or not ml_negative_edge)
+        and signal_value >= exploration_min
+    )
     if not can_probe and not can_explore:
         return {
             "decision_type": "",
@@ -741,7 +887,13 @@ def _weak_down_choppy_short_decision(
     elif status.startswith("mild_"):
         multiplier = min(multiplier * 0.75, _weak_choppy_value(config, "short_direct_exploration_multiplier", 0.10))
     if ml_negative_edge:
-        multiplier = min(multiplier, _ml_policy_value(config, "negative_edge_plus_multiple_soft_issues_multiplier", 0.08))
+        multiplier = min(
+            multiplier,
+            max(
+                _learning_mode_value(config, "min_effective_risk_multiplier_to_trade", 0.05),
+                _weak_choppy_value(config, "short_direct_exploration_multiplier", 0.25),
+            ),
+        )
         decision_type = PolicyDecisionType.EXPLORATION_TRADE.value
         entry_mode = "weak_choppy_direct_exploration_short"
         issue = "weak-down-choppy-negative-edge-exploration"
@@ -1040,7 +1192,60 @@ def _adverse_book(book: dict[str, object] | None) -> bool:
         return False
 
 
-def _microstructure_assessment(book: dict[str, object] | None) -> dict[str, object]:
+def _bucket_spread_selloff(spread_bps: float | None, config: object | None) -> BucketResult:
+    if spread_bps is None:
+        return BucketResult("unknown", 1.0, "")
+    cfg = _selloff_microstructure_config(config)
+    normal = float(getattr(cfg, "max_entry_spread_bps_normal", 20.0))
+    probe = float(getattr(cfg, "max_entry_spread_bps_probe", 32.0))
+    exploration = float(getattr(cfg, "max_entry_spread_bps_exploration", 40.0))
+    if spread_bps <= normal:
+        return BucketResult("normal", 1.0, "")
+    if spread_bps <= probe:
+        return BucketResult("probe", 0.60, "selloff-slightly-wide-spread")
+    if spread_bps <= exploration:
+        return BucketResult("exploration", 0.35, "selloff-wide-spread-bounded")
+    return BucketResult("reject", 0.0, "selloff-spread-above-hard-limit", hard=True)
+
+
+def _bucket_liquidity_cover_selloff(cover: float | None, config: object | None) -> BucketResult:
+    if cover is None:
+        return BucketResult("unknown", 1.0, "")
+    cfg = _selloff_microstructure_config(config)
+    normal = float(getattr(cfg, "min_entry_liquidity_cover_normal", 1.0))
+    probe = float(getattr(cfg, "min_entry_liquidity_cover_probe", 0.6))
+    exploration = float(getattr(cfg, "min_entry_liquidity_cover_exploration", 0.4))
+    if cover >= normal:
+        return BucketResult("normal", 1.0, "")
+    if cover >= probe:
+        return BucketResult("probe", 0.60, "selloff-thin-book-probe")
+    if cover >= exploration:
+        return BucketResult("exploration", 0.35, "selloff-thin-book-exploration")
+    return BucketResult("reject", 0.0, "selloff-liquidity-cover-below-hard-limit", hard=True)
+
+
+def _bucket_imbalance_selloff(side_imbalance: float | None, config: object | None) -> BucketResult:
+    if side_imbalance is None:
+        return BucketResult("unknown", 1.0, "")
+    cfg = _selloff_microstructure_config(config)
+    normal = float(getattr(cfg, "min_entry_book_imbalance_normal", -0.60))
+    probe = float(getattr(cfg, "min_entry_book_imbalance_probe", -0.85))
+    exploration = float(getattr(cfg, "min_entry_book_imbalance_exploration", -0.95))
+    if side_imbalance >= normal:
+        return BucketResult("normal", 1.0, "")
+    if side_imbalance >= probe:
+        return BucketResult("probe", 0.60, "selloff-mild-adverse-book")
+    if side_imbalance >= exploration:
+        return BucketResult("exploration", 0.35, "selloff-medium-adverse-book")
+    return BucketResult("reject", 0.0, "selloff-adverse-book-below-hard-limit", hard=True)
+
+
+def _microstructure_assessment(
+    book: dict[str, object] | None,
+    *,
+    regime: str,
+    config: object | None,
+) -> dict[str, object]:
     if not book:
         return {
             "bucket": "unknown",
@@ -1060,11 +1265,18 @@ def _microstructure_assessment(book: dict[str, object] | None) -> dict[str, obje
     spread = _float_or_none(book.get("spread_bps"))
     cover = _float_or_none(book.get("entry_liquidity_cover"))
     imbalance = _float_or_none(book.get("side_imbalance", book.get("imbalance")))
-    buckets = [
-        bucket_spread(spread),
-        bucket_liquidity_cover(cover),
-        bucket_imbalance(imbalance),
-    ]
+    if regime == "market_selloff_impulse":
+        buckets = [
+            _bucket_spread_selloff(spread, config),
+            _bucket_liquidity_cover_selloff(cover, config),
+            _bucket_imbalance_selloff(imbalance, config),
+        ]
+    else:
+        buckets = [
+            bucket_spread(spread),
+            bucket_liquidity_cover(cover),
+            bucket_imbalance(imbalance),
+        ]
     hard = next((bucket.issue for bucket in buckets if bucket.hard), "")
     soft = [bucket.issue for bucket in buckets if bucket.issue and not bucket.hard]
     worst_bucket = _worst_bucket([bucket.bucket for bucket in buckets])
@@ -1087,6 +1299,7 @@ def _confirmation_assessment(
     confirmation: dict[str, object] | None,
     *,
     side: str,
+    regime: str,
     config: object | None,
 ) -> dict[str, object]:
     if not confirmation or not confirmation.get("available"):
@@ -1114,6 +1327,11 @@ def _confirmation_assessment(
     mild_threshold = _confirmation_value(config, "mild_adverse_ret", 0.0025)
     strong_threshold = _confirmation_value(config, "strong_adverse_ret", 0.005)
     extreme_threshold = _confirmation_value(config, "extreme_adverse_ret", 0.012)
+    selloff_confirmation = (
+        _selloff_confirmation_config(config)
+        if regime == "market_selloff_impulse" and side == SignalDirection.SHORT.value
+        else None
+    )
 
     if adverse_ret <= 0:
         status = "aligned"
@@ -1124,28 +1342,44 @@ def _confirmation_assessment(
         wait = False
     elif adverse_ret < mild_threshold:
         status = "neutral"
-        mode = _confirmation_value(config, "neutral_confirmation_mode", "probe")
-        multiplier = 0.35
+        mode = (
+            str(getattr(selloff_confirmation, "neutral_confirmation_mode", "allow_reduced_short"))
+            if selloff_confirmation is not None
+            else _confirmation_value(config, "neutral_confirmation_mode", "probe")
+        )
+        multiplier = 0.65 if mode == "allow_reduced_short" else 0.35
         soft = ["neutral-5m-confirmation"]
         hard = ""
         wait = False
     elif adverse_ret < strong_threshold:
         status = f"mild_{rebound_label}"
-        mode = _confirmation_value(config, "mild_rebound_against_short_mode", "exploration_or_wait")
-        multiplier = 0.10
+        mode = (
+            str(getattr(selloff_confirmation, "mild_rebound_against_short_mode", "allow_reduced_short"))
+            if selloff_confirmation is not None
+            else _confirmation_value(config, "mild_rebound_against_short_mode", "exploration_or_wait")
+        )
+        multiplier = 0.45 if mode == "allow_reduced_short" else 0.10
         soft = [f"mild-5m-{rebound_label.replace('_', '-')}"]
         hard = ""
         wait = mode == "wait_pullback"
     elif adverse_ret < extreme_threshold:
         status = f"strong_{rebound_label}"
-        mode = _confirmation_value(config, "strong_rebound_against_short_mode", "wait_pullback")
-        multiplier = 0.0 if mode == "wait_pullback" else 0.08
+        mode = (
+            str(getattr(selloff_confirmation, "strong_rebound_against_short_mode", "stop_chase_wait_pullback"))
+            if selloff_confirmation is not None
+            else _confirmation_value(config, "strong_rebound_against_short_mode", "wait_pullback")
+        )
+        wait_modes = {"wait_pullback", "stop_chase_wait_pullback"}
+        multiplier = 0.0 if mode in wait_modes else 0.08
         soft = [f"strong-5m-{rebound_label.replace('_', '-')}"]
         hard = ""
-        wait = mode == "wait_pullback"
+        wait = mode in wait_modes
     else:
         status = f"extreme_{rebound_label}"
-        mode = "reject" if _confirmation_value(config, "hard_block_rebound_against_short", False) else "shadow_only"
+        if selloff_confirmation is not None:
+            mode = str(getattr(selloff_confirmation, "extreme_adverse_mode", "shadow_or_reject"))
+        else:
+            mode = "reject" if _confirmation_value(config, "hard_block_rebound_against_short", False) else "shadow_only"
         multiplier = 0.0
         soft = []
         hard = "extreme-5m-adverse-move" if mode == "reject" else ""
@@ -1162,6 +1396,14 @@ def _confirmation_assessment(
         "wait_pullback": wait,
         "tags": ["entry-confirmation"] if status not in {"aligned", "unavailable"} else [],
     }
+
+
+def _selloff_microstructure_config(config: object | None) -> object | None:
+    return getattr(getattr(config, "learning_microstructure", None), "market_selloff_impulse", None)
+
+
+def _selloff_confirmation_config(config: object | None) -> object | None:
+    return getattr(getattr(config, "confirmation_5m", None), "market_selloff_impulse", None)
 
 
 def _signal_quality_issue(

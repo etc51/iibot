@@ -117,6 +117,99 @@ def test_trade_review_uses_order_book_microstructure_tags():
     assert payload["breakdowns"]["microstructure_quality"][0]["group"] == "wide-spread"
 
 
+def test_trade_review_reports_selloff_capture_and_underallocation():
+    opened = datetime(2026, 7, 7, 10, 0, tzinfo=timezone.utc)
+    trades = [
+        _trade(
+            symbol="SBER",
+            entry_time=opened + timedelta(minutes=2),
+            net_pnl=120.0,
+            signal_strength=0.5,
+            direction=SignalDirection.SHORT,
+            entry_metadata={
+                "market_regime": {"regime": "market_selloff_impulse", "confidence": 0.82},
+                "entry_mode": "market_breakdown_short",
+                "regime_policy": {
+                    "entry_mode": "market_breakdown_short",
+                    "actual_policy_decision": "normal_trade",
+                    "strict_policy_decision": "allow",
+                    "risk_multiplier": 0.6,
+                },
+            },
+        )
+    ]
+    events = [
+        {
+            "timestamp": opened.isoformat(),
+            "action": "market_selloff_impulse_detected",
+            "regime": "market_selloff_impulse",
+        },
+        {
+            "timestamp": (opened + timedelta(minutes=1)).isoformat(),
+            "action": "selloff_short_candidate",
+            "symbol": "SBER",
+            "direction": "short",
+            "regime": "market_selloff_impulse",
+            "entry_mode": "market_breakdown_short",
+            "actual_policy_decision": "normal_trade",
+            "approved": True,
+        },
+        {
+            "timestamp": (opened + timedelta(minutes=1)).isoformat(),
+            "action": "selloff_short_opened",
+            "symbol": "SBER",
+            "direction": "short",
+            "regime": "market_selloff_impulse",
+            "entry_mode": "market_breakdown_short",
+            "actual_policy_decision": "normal_trade",
+            "approved": True,
+        },
+        {
+            "timestamp": (opened + timedelta(minutes=1)).isoformat(),
+            "action": "selloff_short_rejected",
+            "symbol": "GAZP",
+            "direction": "short",
+            "regime": "market_selloff_impulse",
+            "entry_mode": "wait",
+            "actual_policy_decision": "wait_pullback",
+            "approved": False,
+            "reason": "entry deferred for pullback short",
+        },
+        {
+            "timestamp": (opened + timedelta(minutes=3)).isoformat(),
+            "action": "selloff_underallocated",
+            "regime": "market_selloff_impulse",
+            "gross_exposure_pct": 0.12,
+            "selloff_target_gross_exposure": 1.0,
+            "budget_used_pct": 0.12,
+            "unused_budget_reason": "confirmation blocked",
+            "candidates_count": 2,
+            "approved_count": 1,
+            "rejected_count": 1,
+            "wait_count": 1,
+            "shadow_count": 0,
+            "selloff_budget_blockers": {"confirmation blocked": 1},
+        },
+    ]
+
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=120.0),
+        trades,
+        events,
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    assert payload["selloff_capture_review"]["selloff_windows"] == 1
+    assert payload["selloff_capture_review"]["candidates_count"] == 1
+    assert payload["selloff_capture_review"]["trades_opened"] == 1
+    assert payload["selloff_capture_review"]["budget_used_pct"] == 0.12
+    assert payload["underallocation_review"]["selloff_underallocated_count"] == 1
+    assert payload["underallocation_review"]["reasons_for_unused_budget"]["confirmation blocked"] == 1
+    assert payload["long_during_selloff_review"]["long_signals_during_selloff"] == 0
+
+
 def test_trade_review_breaks_down_regime_policy_and_pending_rebound():
     opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
     trades = [

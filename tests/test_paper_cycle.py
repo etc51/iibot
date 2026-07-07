@@ -1439,6 +1439,84 @@ class PaperCycleSignalDiagnosticsTest(unittest.TestCase):
             expected_fill = trigger_candle.close / (1 + config.execution.slippage_bps / 10000)
             self.assertAlmostEqual(position.entry_price, expected_fill)
 
+    def test_paper_cycle_writes_selloff_events_and_underallocation_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8")
+                + "\n".join(
+                    [
+                        "[risk]",
+                        "max_risk_per_trade = 0.001",
+                        "max_gross_exposure = 1.5",
+                        "cash_reserve_ratio = 0.08",
+                        "max_positions = 12",
+                        "",
+                        "[learning_mode]",
+                        "enabled = true",
+                        'profile = "relaxed_paper_learning"',
+                        "",
+                        "[paper_alpha_capture]",
+                        "enabled = true",
+                        "target_gross_exposure_selloff = 1.0",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            latest_candle = Candle(
+                timestamp=datetime(2026, 7, 7, 11, 0, tzinfo=timezone.utc),
+                open=100.4,
+                high=100.6,
+                low=99.8,
+                close=100.0,
+                volume=5_000_000,
+            )
+            orchestrator = _PlainShortCycleOrchestrator(
+                config,
+                _FakeProvider([instrument], {"SBER": [latest_candle]}),
+            )
+            regime = MarketRegime(
+                "market_selloff_impulse",
+                0.82,
+                {
+                    "universe_ret_15m": -0.008,
+                    "universe_ret_30m": -0.011,
+                    "universe_ret_60m": -0.02,
+                    "breadth_down_5m": 0.8,
+                    "breadth_down_15m": 0.9,
+                    "breadth_breaking_15m_lows": 0.5,
+                    "breadth_breaking_30m_lows": 0.5,
+                    "symbols_confirming_count": 12,
+                    "used_fallback": True,
+                    "previous_regime": "weak_down_choppy",
+                    "override_reason": "test",
+                },
+            )
+
+            with patch("samosbor.orchestrator.detect_market_regime", return_value=regime):
+                result = orchestrator.run_paper_cycle()
+
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+            actions = [event["action"] for event in cycle_events]
+            signal_event = next(event for event in cycle_events if event["action"] == "signal")
+            underallocated = next(event for event in cycle_events if event["action"] == "selloff_underallocated")
+
+            self.assertIn("market_selloff_impulse_detected", actions)
+            self.assertIn("selloff_short_candidate", actions)
+            self.assertIn("selloff_short_opened", actions)
+            self.assertIn("selloff_basket_selected", actions)
+            self.assertTrue(signal_event["approved"])
+            self.assertEqual(signal_event["metadata"]["market_regime"]["regime"], "market_selloff_impulse")
+            self.assertEqual(signal_event["metadata"]["regime_policy"]["entry_mode"], "market_breakdown_short")
+            self.assertLess(underallocated["gross_exposure_pct"], 0.30)
+            self.assertEqual(underallocated["candidates_count"], 1)
+
     def test_paper_cycle_observes_short_exhaustion_without_blocking_entry(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

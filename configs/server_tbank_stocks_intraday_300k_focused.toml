@@ -336,6 +336,18 @@ allow_exploration_to_use_global_position_slots = true
 do_not_block_probe_due_to_daily_limit_unless_extreme = true
 do_not_block_exploration_due_to_daily_limit_unless_extreme = true
 
+[paper_alpha_capture]
+enabled = true
+profile = "aggressive_paper_alpha"
+use_full_paper_budget = true
+target_gross_exposure_normal = 0.40
+target_gross_exposure_selloff = 1.00
+max_gross_exposure_selloff = 1.25
+min_cash_reserve_selloff = 0.03
+allow_budget_ramp = true
+budget_ramp_step_per_cycle = 0.25
+do_not_wait_for_pullback_in_broad_selloff = true
+
 [learning_risk.normal]
 risk_multiplier = 1.0
 max_positions = 12
@@ -370,14 +382,15 @@ same_regime_cap_multiplier = 0.50
 enable_probe_now_with_pending_addon = true
 short_direct_probe_enabled = true
 short_direct_exploration_enabled = true
-short_direct_probe_min_signal_strength = 0.20
-short_direct_exploration_min_signal_strength = 0.12
-short_direct_probe_max_soft_issues = 4
-short_direct_probe_multiplier = 0.25
-short_direct_exploration_multiplier = 0.10
+short_direct_probe_min_signal_strength = 0.15
+short_direct_exploration_min_signal_strength = 0.08
+short_direct_probe_max_soft_issues = 8
+short_direct_probe_multiplier = 0.40
+short_direct_exploration_multiplier = 0.25
 create_pullback_addon_after_direct_probe = true
 pullback_addon_multiplier = 0.15
 strict_policy_keeps_wait_pullback = true
+allow_ml_negative_edge_exploration = true
 
 [regime_policy.weak_down_choppy.short_confirmation]
 aligned_5m_mode = "probe"
@@ -400,10 +413,10 @@ full_size_long_requires_clean_uptrend = true
 
 [regime_policy.clean_uptrend.long]
 allow_direct_trend_long = true
-long_direct_probe_min_signal_strength = 0.20
-long_direct_normal_min_signal_strength = 0.35
-long_probe_multiplier = 0.15
-long_normal_multiplier = 0.25
+long_direct_probe_min_signal_strength = 0.15
+long_direct_normal_min_signal_strength = 0.30
+long_probe_multiplier = 0.20
+long_normal_multiplier = 0.35
 
 [regime_policy.mixed.long]
 allow_long_probe = true
@@ -421,20 +434,48 @@ require_failed_breakdown_or_reclaim = true
 allow_normal_long = false
 allow_rebound_probe_long = true
 allow_rebound_exploration_long = true
-long_probe_multiplier = 0.05
-long_exploration_multiplier = 0.03
+long_probe_multiplier = 0.06
+long_exploration_multiplier = 0.04
 require_strong_rebound_or_failed_breakdown = true
 default_long_mode = "shadow_only"
 
+[confirmation_5m.market_selloff_impulse]
+min_bars = 1
+allow_same_bar_breakdown = true
+neutral_confirmation_mode = "allow_reduced_short"
+mild_rebound_against_short_mode = "allow_reduced_short"
+strong_rebound_against_short_mode = "stop_chase_wait_pullback"
+extreme_adverse_mode = "shadow_or_reject"
+
+[microstructure.market_selloff_impulse]
+max_entry_spread_bps_normal = 20.0
+max_entry_spread_bps_probe = 32.0
+max_entry_spread_bps_exploration = 40.0
+min_entry_liquidity_cover_normal = 1.0
+min_entry_liquidity_cover_probe = 0.6
+min_entry_liquidity_cover_exploration = 0.4
+min_entry_book_imbalance_normal = -0.60
+min_entry_book_imbalance_probe = -0.85
+min_entry_book_imbalance_exploration = -0.95
+
 [market_selloff_impulse.basket]
 enabled = true
-max_new_shorts_per_cycle = 8
-max_selloff_positions = 10
+max_new_shorts_per_cycle = 12
+max_selloff_positions = 12
 per_symbol_risk_multiplier = 0.15
-max_total_selloff_risk = 0.015
+per_symbol_exposure_target = 0.08
+per_symbol_exposure_max = 0.12
+max_total_selloff_gross_exposure = 1.00
+max_total_selloff_risk = 0.03
 prefer_liquid_symbols = true
-min_symbols_to_trade = 2
-max_symbols_to_trade = 10
+min_symbols_to_trade = 4
+max_symbols_to_trade = 12
+
+[market_selloff_impulse.risk]
+market_breakdown_short_multiplier = 0.60
+selloff_momentum_short_multiplier = 0.45
+panic_probe_short_multiplier = 0.25
+post_selloff_failed_rebound_short_multiplier = 0.35
 
 [market_selloff_impulse.learning_caps]
 max_same_symbol_selloff_trades_per_day = 2
@@ -448,7 +489,7 @@ same_entry_mode_cap_behavior = "reduce_size"
 [market_selloff_impulse.long]
 allow_normal_long = false
 allow_capitulation_bounce_probe = true
-capitulation_bounce_probe_multiplier = 0.03
+capitulation_bounce_probe_multiplier = 0.05
 default_long_mode = "shadow_or_tiny_probe"
 require_reclaim_confirmation = true
 

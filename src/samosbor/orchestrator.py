@@ -1073,6 +1073,8 @@ class TradingOrchestrator:
                 **market_regime.as_event(),
             }
         )
+        if market_regime.regime == "market_selloff_impulse":
+            cycle_events.append(self._market_selloff_detected_event(market_regime, timestamp))
         resolve_pending_signals(signal_feedback, history)
         pending_entry_results = evaluate_pending_entries(signal_feedback, history)
         triggered_pending_entries_by_symbol: dict[str, list[dict[str, object]]] = {}
@@ -1398,11 +1400,22 @@ class TradingOrchestrator:
                         block_reason=microstructure_block_reason,
                     )
                 )
+                cycle_events.extend(self._selloff_signal_events(event, market_regime))
                 cycle_events.append(event)
                 if decision.approved:
                     if microstructure_block_reason is None:
                         broker.open_position(signal_for_entry, entry_quantity_lots, latest.timestamp)
 
+        if market_regime.regime == "market_selloff_impulse":
+            cycle_events.extend(
+                self._selloff_cycle_events(
+                    broker,
+                    marks,
+                    cycle_events,
+                    market_regime=market_regime,
+                    timestamp=timestamp,
+                )
+            )
         broker.mark_to_market(marks, timestamp)
         broker.events.extend(cycle_events)
         broker.save(state_path)
@@ -1979,6 +1992,235 @@ class TradingOrchestrator:
                 events.append({**base, "action": "long_shadow_only_created"})
         return events
 
+    @staticmethod
+    def _market_selloff_detected_event(market_regime, timestamp: datetime) -> dict[str, object]:
+        features = dict(market_regime.as_event().get("features", {}))
+        return {
+            "timestamp": timestamp.isoformat(),
+            "action": "market_selloff_impulse_detected",
+            "event_type": "market_regime_override",
+            "regime": market_regime.regime,
+            "confidence": round(float(market_regime.confidence), 4),
+            "universe_ret_15m": features.get("universe_ret_15m", 0.0),
+            "universe_ret_30m": features.get("universe_ret_30m", 0.0),
+            "universe_ret_60m": features.get("universe_ret_60m", 0.0),
+            "breadth_down_5m": features.get("breadth_down_5m", 0.0),
+            "breadth_down_15m": features.get("breadth_down_15m", 0.0),
+            "breadth_breaking_15m_lows": features.get("breadth_breaking_15m_lows", 0.0),
+            "breadth_breaking_30m_lows": features.get("breadth_breaking_30m_lows", 0.0),
+            "symbols_confirming_count": features.get("symbols_confirming_count", 0),
+            "used_fallback": features.get("used_fallback", False),
+            "previous_regime": features.get("previous_regime", "unknown"),
+            "override_reason": features.get("override_reason", ""),
+            "metadata": {"market_regime": market_regime.as_event()},
+        }
+
+    def _selloff_signal_events(self, event: dict[str, object], market_regime) -> list[dict[str, object]]:
+        if market_regime.regime != "market_selloff_impulse":
+            return []
+        if str(event.get("direction", event.get("side", ""))) != SignalDirection.SHORT.value:
+            return []
+        metadata = event.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        policy = metadata.get("regime_policy", {})
+        if not isinstance(policy, dict):
+            policy = {}
+        base = {
+            "timestamp": event.get("timestamp", ""),
+            "symbol": event.get("symbol", ""),
+            "action": "selloff_short_candidate",
+            "regime": "market_selloff_impulse",
+            "direction": SignalDirection.SHORT.value,
+            "strength": event.get("strength", 0.0),
+            "approved": bool(event.get("approved", False)),
+            "reason": event.get("reason", ""),
+            "entry_mode": event.get("entry_mode", metadata.get("entry_mode", policy.get("entry_mode", ""))),
+            "actual_policy_decision": event.get(
+                "actual_policy_decision",
+                policy.get("actual_policy_decision", policy.get("decision_type", "")),
+            ),
+            "strict_policy_decision": event.get("strict_policy_decision", policy.get("strict_policy_decision", "")),
+            "quantity_lots": event.get("quantity_lots", 0),
+            "risk_multiplier": event.get("risk_multiplier", policy.get("risk_multiplier", 0.0)),
+            "soft_issues": event.get("soft_issues", policy.get("soft_issues", [])),
+            "hard_issues": event.get("hard_issues", policy.get("hard_issues", [])),
+            "metadata": {
+                "market_regime": market_regime.as_event(),
+                "regime_policy": policy,
+                "original_signal_event": {
+                    "approved": bool(event.get("approved", False)),
+                    "reason": event.get("reason", ""),
+                    "quantity_lots": event.get("quantity_lots", 0),
+                    "original_quantity_lots": event.get("original_quantity_lots", 0),
+                },
+            },
+        }
+        events: list[dict[str, object]] = [base]
+        if bool(policy.get("selloff_policy_override_applied", False)):
+            events.append({**base, "action": "selloff_policy_override_applied"})
+        events.append(
+            {
+                **base,
+                "action": "selloff_short_opened" if bool(event.get("approved", False)) else "selloff_short_rejected",
+            }
+        )
+        return events
+
+    def _selloff_cycle_events(
+        self,
+        broker,
+        marks: dict[str, float],
+        cycle_events: list[dict[str, object]],
+        *,
+        market_regime,
+        timestamp: datetime,
+    ) -> list[dict[str, object]]:
+        candidates = [event for event in cycle_events if event.get("action") == "selloff_short_candidate"]
+        approved = [event for event in cycle_events if event.get("action") == "selloff_short_opened"]
+        rejected = [event for event in cycle_events if event.get("action") == "selloff_short_rejected"]
+        wait_count = sum(
+            1
+            for event in candidates
+            if str(event.get("entry_mode", "")) == "wait"
+            or str(event.get("actual_policy_decision", "")) == PolicyDecisionType.WAIT_PULLBACK.value
+        )
+        shadow_count = sum(
+            1
+            for event in candidates
+            if str(event.get("actual_policy_decision", "")) == PolicyDecisionType.SHADOW_ONLY.value
+        )
+        equity = broker.portfolio.equity(marks)
+        gross_exposure = broker.portfolio.gross_exposure(marks)
+        gross_exposure_pct = gross_exposure / equity if equity > 0 else 0.0
+        normal_target = self._paper_alpha_target_gross_exposure(normal=True)
+        selloff_target = self._paper_alpha_target_gross_exposure(normal=False)
+        budget_used_pct = gross_exposure_pct / selloff_target if selloff_target > 0 else 0.0
+        blockers = self._selloff_budget_blockers(candidates, rejected, wait_count=wait_count, shadow_count=shadow_count)
+        unused_reason = self._selloff_unused_budget_reason(
+            candidates_count=len(candidates),
+            approved_count=len(approved),
+            gross_exposure_pct=gross_exposure_pct,
+            selloff_target=selloff_target,
+            blockers=blockers,
+        )
+        diagnostics = {
+            "equity": round(equity, 2),
+            "gross_exposure": round(gross_exposure, 2),
+            "gross_exposure_pct": round(gross_exposure_pct, 6),
+            "target_gross_exposure": round(normal_target, 6),
+            "selloff_target_gross_exposure": round(selloff_target, 6),
+            "budget_used_pct": round(budget_used_pct, 6),
+            "unused_budget_reason": unused_reason,
+            "candidates_count": len(candidates),
+            "approved_count": len(approved),
+            "rejected_count": len(rejected),
+            "wait_count": wait_count,
+            "shadow_count": shadow_count,
+            "selloff_budget_blockers": blockers,
+        }
+        selected_symbols = [str(event.get("symbol", "")) for event in approved if str(event.get("symbol", ""))]
+        events = [
+            {
+                "timestamp": timestamp.isoformat(),
+                "action": "selloff_basket_selected",
+                "regime": market_regime.regime,
+                "selected_symbols": selected_symbols,
+                "candidates_count": len(candidates),
+                "selected_count": len(selected_symbols),
+                "metadata": {"selloff_budget_diagnostics": diagnostics},
+            }
+        ]
+        budget_action = "selloff_budget_used" if budget_used_pct >= 0.80 else "selloff_budget_unused"
+        events.append(
+            {
+                "timestamp": timestamp.isoformat(),
+                "action": budget_action,
+                "regime": market_regime.regime,
+                **diagnostics,
+                "metadata": {"selloff_budget_diagnostics": diagnostics},
+            }
+        )
+        if gross_exposure_pct < 0.30:
+            events.append(
+                {
+                    "timestamp": timestamp.isoformat(),
+                    "action": "selloff_underallocated",
+                    "severity": "warning",
+                    "regime": market_regime.regime,
+                    **diagnostics,
+                    "metadata": {"selloff_budget_diagnostics": diagnostics},
+                }
+            )
+        return events
+
+    def _paper_alpha_target_gross_exposure(self, *, normal: bool) -> float:
+        paper_alpha = getattr(self.config, "paper_alpha_capture", None)
+        if bool(getattr(paper_alpha, "enabled", False)) and self.config.execution.mode.value == "local-paper":
+            field = "target_gross_exposure_normal" if normal else "target_gross_exposure_selloff"
+            return max(0.0, float(getattr(paper_alpha, field, 0.40 if normal else 1.00)))
+        if normal:
+            return min(float(self.config.risk.max_gross_exposure), 0.40)
+        basket = getattr(getattr(self.config, "market_selloff_impulse", None), "basket", None)
+        return max(0.0, float(getattr(basket, "max_total_selloff_gross_exposure", 1.00)))
+
+    @staticmethod
+    def _selloff_budget_blockers(
+        candidates: list[dict[str, object]],
+        rejected: list[dict[str, object]],
+        *,
+        wait_count: int,
+        shadow_count: int,
+    ) -> dict[str, int]:
+        blockers: Counter[str] = Counter()
+        if not candidates:
+            blockers["no candidates"] += 1
+        if wait_count:
+            blockers["wait_pullback"] += wait_count
+        if shadow_count:
+            blockers["shadow_only"] += shadow_count
+        for event in rejected:
+            reason = str(event.get("reason", "")).lower()
+            hard_issues = " ".join(str(issue).lower() for issue in event.get("hard_issues", []) if issue)
+            soft_issues = " ".join(str(issue).lower() for issue in event.get("soft_issues", []) if issue)
+            text = " ".join([reason, hard_issues, soft_issues])
+            if "risk" in text or "exposure" in text or "cash" in text or "positions" in text:
+                blockers["risk blocked"] += 1
+            elif "micro" in text or "book" in text or "spread" in text or "liquidity" in text:
+                blockers["microstructure blocked"] += 1
+            elif "confirmation" in text or "rebound" in text or "pullback" in text:
+                blockers["confirmation blocked"] += 1
+            elif "ml" in text:
+                blockers["ML blocked"] += 1
+            elif "lot" in text or "size" in text:
+                blockers["lot sizing failed"] += 1
+            elif "policy" in text or "shadow" in text:
+                blockers["policy blocked"] += 1
+            else:
+                blockers["unknown"] += 1
+        return dict(sorted(blockers.items()))
+
+    @staticmethod
+    def _selloff_unused_budget_reason(
+        *,
+        candidates_count: int,
+        approved_count: int,
+        gross_exposure_pct: float,
+        selloff_target: float,
+        blockers: dict[str, int],
+    ) -> str:
+        if selloff_target > 0 and gross_exposure_pct >= selloff_target * 0.80:
+            return "target gross exposure reached"
+        if candidates_count <= 0:
+            return "no candidates"
+        if approved_count <= 0:
+            if blockers:
+                return max(blockers.items(), key=lambda item: item[1])[0]
+            return "policy blocked"
+        if blockers:
+            return "partial allocation: " + max(blockers.items(), key=lambda item: item[1])[0]
+        return "partial allocation: risk manager sizing or position slots"
+
     def _record_rejected_shadow_if_needed(
         self,
         feedback_payload: dict[str, object],
@@ -2096,10 +2338,22 @@ class TradingOrchestrator:
         if mode_name is None:
             return signal, quantity_lots, None, []
         mode_config = getattr(self.config.learning_risk, mode_name)
+        selloff_active = (
+            self._signal_market_regime(signal) == "market_selloff_impulse"
+            and signal.direction == SignalDirection.SHORT
+        )
+        selloff_basket = getattr(getattr(self.config, "market_selloff_impulse", None), "basket", None)
+        selloff_caps = getattr(getattr(self.config, "market_selloff_impulse", None), "learning_caps", None)
         mode_open_positions = sum(
             1
             for position in broker.portfolio.positions.values()
             if self._position_policy_mode(position) == decision_type
+        )
+        selloff_positions_count = sum(
+            1
+            for position in broker.portfolio.positions.values()
+            if position.direction == SignalDirection.SHORT
+            and self._position_market_regime(position) == "market_selloff_impulse"
         )
         use_global_slots = (
             mode_name == "probe"
@@ -2115,70 +2369,132 @@ class TradingOrchestrator:
             signal=signal,
             decision_type=decision_type,
         )
+        selloff_cycle_count = (
+            sum(
+                1
+                for event in events
+                if event.get("action") == "signal"
+                and bool(event.get("approved"))
+                and self._event_market_regime(event) == "market_selloff_impulse"
+                and str(event.get("direction", event.get("side", ""))) == SignalDirection.SHORT.value
+            )
+            if selloff_active
+            else 0
+        )
         tags: list[str] = []
         cap_behavior = "allow"
         multiplier = 1.0
         block_reason: str | None = None
         cap_events: list[dict[str, object]] = []
 
-        if not use_global_slots and int(mode_config.max_positions) > 0 and mode_open_positions >= int(mode_config.max_positions):
+        if (
+            selloff_active
+            and int(getattr(selloff_basket, "max_selloff_positions", 0) or 0) > 0
+            and selloff_positions_count >= int(getattr(selloff_basket, "max_selloff_positions", 0) or 0)
+        ):
+            block_reason = "entry blocked by selloff max positions"
+            cap_behavior = "shadow_only"
+            tags.append("selloff_positions_cap_hit")
+
+        if (
+            block_reason is None
+            and not use_global_slots
+            and int(mode_config.max_positions) > 0
+            and mode_open_positions >= int(mode_config.max_positions)
+        ):
             block_reason = f"entry blocked by {mode_name} learning max positions"
             cap_behavior = "block"
             tags.append(f"{mode_name}_positions_cap_hit")
 
-        max_new_trades = int(mode_config.max_new_trades_per_cycle)
-        if block_reason is None and max_new_trades > 0 and counts["cycle_mode_count"] >= max_new_trades:
-            block_reason = f"entry blocked by {mode_name} learning per-cycle cap"
+        max_new_trades = (
+            int(getattr(selloff_basket, "max_new_shorts_per_cycle", 0) or 0)
+            if selloff_active
+            else int(mode_config.max_new_trades_per_cycle)
+        )
+        current_cycle_count = selloff_cycle_count if selloff_active else counts["cycle_mode_count"]
+        if block_reason is None and max_new_trades > 0 and current_cycle_count >= max_new_trades:
+            block_reason = (
+                "entry blocked by selloff per-cycle cap"
+                if selloff_active
+                else f"entry blocked by {mode_name} learning per-cycle cap"
+            )
             cap_behavior = "shadow_only"
-            tags.append("new_trades_per_cycle_learning_cap_hit")
+            tags.append("new_selloff_shorts_per_cycle_cap_hit" if selloff_active else "new_trades_per_cycle_learning_cap_hit")
 
         max_daily = int(mode_config.max_trades_per_day)
         if max_daily > 0 and counts["mode_count_today"] >= max_daily:
             tags.append(f"{mode_name}_daily_cap_soft_warning")
-            daily_behavior = self._learning_cap_behavior("daily_cap_behavior")
+            daily_behavior = self._learning_cap_behavior("daily_cap_behavior", selloff_active=selloff_active)
             if block_reason is None and daily_behavior in {"shadow_only", "block"}:
                 block_reason = f"entry blocked by {mode_name} learning daily trade cap"
                 cap_behavior = daily_behavior
             elif cap_behavior == "allow":
                 cap_behavior = "warn_only"
 
+        same_symbol_limit = (
+            int(getattr(selloff_caps, "max_same_symbol_selloff_trades_per_day", 0) or 0)
+            if selloff_active
+            else int(mode_config.max_same_symbol_trades_per_day)
+        )
         if (
             block_reason is None
-            and int(mode_config.max_same_symbol_trades_per_day) > 0
-            and counts["same_symbol_count_today"] >= int(mode_config.max_same_symbol_trades_per_day)
+            and same_symbol_limit > 0
+            and counts["same_symbol_count_today"] >= same_symbol_limit
         ):
-            tags.extend(["same_symbol_learning_cap_hit", "oversampled_symbol"])
-            behavior = self._learning_cap_behavior("same_symbol_cap_behavior")
+            tags.extend(
+                ["same_symbol_selloff_cap_hit", "oversampled_symbol"]
+                if selloff_active
+                else ["same_symbol_learning_cap_hit", "oversampled_symbol"]
+            )
+            behavior = self._learning_cap_behavior("same_symbol_cap_behavior", selloff_active=selloff_active)
             if behavior in {"shadow_only", "block"}:
-                block_reason = "same_symbol_learning_cap_hit"
+                block_reason = "same_symbol_selloff_cap_hit" if selloff_active else "same_symbol_learning_cap_hit"
                 cap_behavior = behavior
             elif behavior == "reduce_size":
                 multiplier *= self._learning_cap_same_regime_multiplier()
                 cap_behavior = "reduce_size"
 
+        same_entry_limit = (
+            int(getattr(selloff_caps, "max_same_entry_mode_selloff_trades_per_day", 0) or 0)
+            if selloff_active
+            else int(mode_config.max_same_entry_mode_trades_per_day)
+        )
         if (
             block_reason is None
-            and int(mode_config.max_same_entry_mode_trades_per_day) > 0
-            and counts["same_entry_mode_count_today"] >= int(mode_config.max_same_entry_mode_trades_per_day)
+            and same_entry_limit > 0
+            and counts["same_entry_mode_count_today"] >= same_entry_limit
         ):
-            tags.extend(["same_entry_mode_learning_cap_hit", "oversampled_entry_mode"])
-            behavior = self._learning_cap_behavior("same_entry_mode_cap_behavior")
+            tags.extend(
+                ["same_entry_mode_selloff_cap_hit", "oversampled_entry_mode"]
+                if selloff_active
+                else ["same_entry_mode_learning_cap_hit", "oversampled_entry_mode"]
+            )
+            behavior = self._learning_cap_behavior("same_entry_mode_cap_behavior", selloff_active=selloff_active)
             if behavior in {"shadow_only", "block"}:
-                block_reason = "same_entry_mode_learning_cap_hit"
+                block_reason = "same_entry_mode_selloff_cap_hit" if selloff_active else "same_entry_mode_learning_cap_hit"
                 cap_behavior = behavior
             elif behavior == "reduce_size":
                 multiplier *= self._learning_cap_same_regime_multiplier()
                 cap_behavior = "reduce_size"
 
+        same_regime_limit = (
+            int(getattr(selloff_caps, "max_same_regime_selloff_trades_per_day", 0) or 0)
+            if selloff_active
+            else int(mode_config.max_same_regime_trades_per_day)
+        )
         if (
             block_reason is None
-            and int(mode_config.max_same_regime_trades_per_day) > 0
-            and counts["same_regime_count_today"] >= int(mode_config.max_same_regime_trades_per_day)
+            and same_regime_limit > 0
+            and counts["same_regime_count_today"] >= same_regime_limit
         ):
-            tags.extend(["same_regime_learning_cap_hit", "oversampled_regime"])
-            behavior = self._learning_cap_behavior("same_regime_cap_behavior")
+            tags.extend(
+                ["same_regime_selloff_cap_hit", "oversampled_regime"]
+                if selloff_active
+                else ["same_regime_learning_cap_hit", "oversampled_regime"]
+            )
+            behavior = self._learning_cap_behavior("same_regime_cap_behavior", selloff_active=selloff_active)
             if behavior in {"shadow_only", "block"}:
-                block_reason = "same_regime_learning_cap_hit"
+                block_reason = "same_regime_selloff_cap_hit" if selloff_active else "same_regime_learning_cap_hit"
                 cap_behavior = behavior
             elif behavior == "reduce_size":
                 multiplier *= self._learning_cap_same_regime_multiplier()
@@ -2206,6 +2522,17 @@ class TradingOrchestrator:
             adjusted_quantity_lots=0 if block_reason is not None else adjusted_quantity,
             size_multiplier=multiplier,
         )
+        if selloff_active:
+            metadata.update(
+                {
+                    "selloff_active": True,
+                    "selloff_positions_count": selloff_positions_count,
+                    "new_selloff_shorts_this_cycle": selloff_cycle_count,
+                    "same_symbol_selloff_cap_hit": "same_symbol_selloff_cap_hit" in tags,
+                    "same_entry_mode_selloff_cap_hit": "same_entry_mode_selloff_cap_hit" in tags,
+                    "same_regime_selloff_cap_hit": "same_regime_selloff_cap_hit" in tags,
+                }
+            )
         signal = self._signal_with_learning_cap_metadata(signal, metadata)
         cap_events = self._learning_cap_events(
             signal,
@@ -2353,10 +2680,14 @@ class TradingOrchestrator:
     def _signal_with_learning_cap_metadata(signal, learning_caps: dict[str, object]):
         metadata = dict(signal.metadata)
         metadata["learning_caps"] = dict(learning_caps)
+        if bool(learning_caps.get("selloff_active", False)):
+            metadata["selloff_learning_caps"] = dict(learning_caps)
         policy = metadata.get("regime_policy", {})
         if isinstance(policy, dict):
             policy = dict(policy)
             policy["learning_caps"] = dict(learning_caps)
+            if bool(learning_caps.get("selloff_active", False)):
+                policy["selloff_learning_caps"] = dict(learning_caps)
             policy["oversampling_tags"] = list(learning_caps.get("oversampling_tags", []))
             metadata["regime_policy"] = policy
             metadata["regime_policy_audit"] = policy
@@ -2379,18 +2710,30 @@ class TradingOrchestrator:
             action = "learning_cap_reduce_size"
         else:
             action = "learning_cap_shadow_only"
+        if bool(metadata.get("selloff_active", False)):
+            action = f"selloff_{action}"
         return [
             {
                 "timestamp": timestamp.isoformat(),
                 "symbol": signal.instrument.symbol,
                 "action": action,
                 "reason": block_reason or behavior,
-                "metadata": {"learning_caps": dict(metadata)},
+                "metadata": {
+                    "learning_caps": dict(metadata),
+                    "selloff_learning_caps": dict(metadata)
+                    if bool(metadata.get("selloff_active", False))
+                    else {},
+                },
             }
         ]
 
-    def _learning_cap_behavior(self, name: str) -> str:
-        value = str(getattr(self.config.learning_caps, name, "warn_only"))
+    def _learning_cap_behavior(self, name: str, *, selloff_active: bool = False) -> str:
+        source = (
+            getattr(getattr(self.config, "market_selloff_impulse", None), "learning_caps", None)
+            if selloff_active
+            else self.config.learning_caps
+        )
+        value = str(getattr(source, name, "warn_only"))
         if value not in {"warn_only", "shadow_only", "block", "reduce_size"}:
             return "warn_only"
         return value
@@ -2405,6 +2748,14 @@ class TradingOrchestrator:
         if isinstance(policy, dict):
             return str(policy.get("decision_type", policy.get("actual_policy_decision", "")))
         return str(metadata.get("actual_policy_decision", ""))
+
+    @staticmethod
+    def _position_market_regime(position) -> str:
+        metadata = dict(getattr(position, "entry_metadata", {}) or {})
+        market_regime = metadata.get("market_regime", {})
+        if isinstance(market_regime, dict):
+            return str(market_regime.get("regime", "unknown"))
+        return str(market_regime or "unknown")
 
     def _symbol_health(self, symbol: str, trades) -> str:
         recent = [trade for trade in reversed(trades) if trade.symbol == symbol][:6]

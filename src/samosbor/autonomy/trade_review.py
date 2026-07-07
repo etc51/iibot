@@ -89,6 +89,9 @@ def build_trade_review_payload(
         "policy_signal_distribution": _policy_signal_distribution(parsed_events),
         "policy_outcomes": _policy_outcomes(reviews),
         "weak_choppy_direct_probe_review": _weak_choppy_direct_probe_review(reviews, parsed_events),
+        "selloff_capture_review": _selloff_capture_review(reviews, parsed_events),
+        "underallocation_review": _underallocation_review(parsed_events),
+        "long_during_selloff_review": _long_during_selloff_review(reviews, parsed_events),
         "long_learning_review": _long_learning_review(reviews, parsed_events),
         "strict_vs_relaxed": _strict_vs_relaxed_review(reviews, parsed_events),
         "blocker_review": _blocker_review(parsed_events),
@@ -1102,6 +1105,147 @@ def _policy_outcomes(reviews: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
+def _selloff_capture_review(
+    reviews: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    detections = [event for event in events if event.get("action") == "market_selloff_impulse_detected"]
+    selloff_candidates = [event for event in events if event.get("action") == "selloff_short_candidate"]
+    opened_events = [event for event in events if event.get("action") == "selloff_short_opened"]
+    rejected_events = [event for event in events if event.get("action") == "selloff_short_rejected"]
+    budget_events = [
+        event
+        for event in events
+        if event.get("action") in {"selloff_budget_used", "selloff_budget_unused", "selloff_underallocated"}
+    ]
+    selloff_reviews = [review for review in reviews if review.get("market_regime") == "market_selloff_impulse"]
+    selloff_short_reviews = [
+        review
+        for review in selloff_reviews
+        if review.get("direction") == "short"
+    ]
+    detected_at = _first_event_iso(detections)
+    first_trade_at = _first_event_iso(opened_events) or _first_review_entry_iso(selloff_short_reviews)
+    latency_minutes = _latency_minutes(detected_at, first_trade_at)
+    diagnostics = _latest_selloff_diagnostics(budget_events)
+    return {
+        "selloff_windows": len(detections),
+        "selloff_detected_at": detected_at,
+        "first_selloff_trade_at": first_trade_at,
+        "latency_minutes": latency_minutes,
+        "candidates_count": len(selloff_candidates),
+        "trades_opened": len(opened_events),
+        "gross_exposure_at_detection": diagnostics.get("gross_exposure_pct", 0.0),
+        "gross_exposure_peak_during_selloff": max(
+            [float(_event_diagnostics(event).get("gross_exposure_pct", 0.0) or 0.0) for event in budget_events],
+            default=0.0,
+        ),
+        "target_gross_exposure": diagnostics.get("selloff_target_gross_exposure", 0.0),
+        "budget_used_pct": diagnostics.get("budget_used_pct", 0.0),
+        "missed_budget_pct": round(max(0.0, 1.0 - float(diagnostics.get("budget_used_pct", 0.0) or 0.0)), 6),
+        "selloff_pnl": _pnl_for_reviews(selloff_short_reviews),
+        "selloff_pnl_by_entry_mode": _pnl_by_entry_modes(
+            selloff_short_reviews,
+            [
+                "market_breakdown_short",
+                "selloff_momentum_short",
+                "panic_probe_short",
+                "post_selloff_failed_rebound_short",
+            ],
+        ),
+        "rejection_reasons": dict(
+            sorted(Counter(str(event.get("reason", "")) for event in rejected_events if event.get("reason")).items())
+        ),
+        "wait_only_count_during_selloff": sum(
+            1
+            for event in selloff_candidates
+            if _event_entry_mode(event) == "wait"
+            or _event_policy_fields(event).get("actual_policy_decision") == "wait_pullback"
+        ),
+    }
+
+
+def _underallocation_review(events: list[dict[str, object]]) -> dict[str, object]:
+    underallocated = [event for event in events if event.get("action") == "selloff_underallocated"]
+    budget_events = [
+        event
+        for event in events
+        if event.get("action") in {"selloff_budget_used", "selloff_budget_unused", "selloff_underallocated"}
+    ]
+    budget_used = [float(_event_diagnostics(event).get("budget_used_pct", 0.0) or 0.0) for event in budget_events]
+    skipped_symbols = sorted(
+        {
+            str(event.get("symbol", ""))
+            for event in events
+            if event.get("action") == "selloff_short_rejected" and str(event.get("symbol", "")).strip()
+        }
+    )
+    reason_counts = Counter(
+        str(_event_diagnostics(event).get("unused_budget_reason", event.get("unused_budget_reason", "")))
+        for event in budget_events
+        if str(_event_diagnostics(event).get("unused_budget_reason", event.get("unused_budget_reason", ""))).strip()
+    )
+    blocker_counts: Counter[str] = Counter()
+    for event in budget_events:
+        blockers = _event_diagnostics(event).get("selloff_budget_blockers", {})
+        if isinstance(blockers, dict):
+            for key, value in blockers.items():
+                blocker_counts[str(key)] += int(value or 0)
+    return {
+        "selloff_underallocated_count": len(underallocated),
+        "avg_budget_used_pct": round(sum(budget_used) / len(budget_used), 6) if budget_used else 0.0,
+        "max_budget_used_pct": round(max(budget_used), 6) if budget_used else 0.0,
+        "reasons_for_unused_budget": dict(sorted(reason_counts.items())),
+        "selloff_budget_blockers": dict(sorted(blocker_counts.items())),
+        "symbols_skipped_despite_selloff": skipped_symbols,
+        "shadow_pnl_for_skipped_candidates": {"available": False, "reason": "shadow PnL unavailable in current cycle events"},
+    }
+
+
+def _long_during_selloff_review(
+    reviews: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    long_signal_events = [
+        event
+        for event in events
+        if str(event.get("direction", event.get("side", ""))) == "long"
+        and _event_regime(event) == "market_selloff_impulse"
+    ]
+    selloff_long_reviews = [
+        review
+        for review in reviews
+        if review.get("direction") == "long" and review.get("market_regime") == "market_selloff_impulse"
+    ]
+    return {
+        "long_signals_during_selloff": len(long_signal_events),
+        "long_shadow_count": sum(
+            1
+            for event in long_signal_events
+            if _event_policy_fields(event).get("actual_policy_decision") == "shadow_only"
+            or event.get("action") == "long_shadow_only_created"
+        ),
+        "capitulation_bounce_probes": sum(
+            1
+            for event in long_signal_events
+            if _event_entry_mode(event) == "capitulation_bounce_probe_long"
+        ),
+        "long_pnl_after_reclaim": _pnl_for_reviews(
+            [
+                review
+                for review in selloff_long_reviews
+                if review.get("entry_mode") == "capitulation_bounce_probe_long"
+            ]
+        ),
+        "false_bounce_losses": sum(
+            1
+            for review in selloff_long_reviews
+            if review.get("entry_mode") == "capitulation_bounce_probe_long"
+            and float(review.get("net_pnl_rub", 0.0) or 0.0) < 0.0
+        ),
+    }
+
+
 def _weak_choppy_direct_probe_review(
     reviews: list[dict[str, object]],
     events: list[dict[str, object]],
@@ -1508,6 +1652,73 @@ def _pending_event_is_addon(event: dict[str, object]) -> bool:
     return isinstance(metadata, dict) and bool(metadata.get("is_addon", False))
 
 
+def _first_event_iso(events: list[dict[str, object]]) -> str:
+    timestamps = [
+        event.get("_timestamp")
+        for event in events
+        if isinstance(event.get("_timestamp"), datetime)
+    ]
+    if not timestamps:
+        return ""
+    return min(timestamps).isoformat()
+
+
+def _first_review_entry_iso(reviews: list[dict[str, object]]) -> str:
+    timestamps = [
+        _parse_timestamp(review.get("entry_time"))
+        for review in reviews
+        if review.get("entry_time")
+    ]
+    timestamps = [timestamp for timestamp in timestamps if timestamp is not None]
+    if not timestamps:
+        return ""
+    return min(timestamps).isoformat()
+
+
+def _latency_minutes(start_iso: str, end_iso: str) -> float | None:
+    start = _parse_timestamp(start_iso)
+    end = _parse_timestamp(end_iso)
+    if start is None or end is None:
+        return None
+    return round(max(0.0, (end - start).total_seconds() / 60.0), 3)
+
+
+def _event_diagnostics(event: dict[str, object]) -> dict[str, object]:
+    metadata = event.get("metadata", {})
+    if isinstance(metadata, dict) and isinstance(metadata.get("selloff_budget_diagnostics"), dict):
+        return dict(metadata["selloff_budget_diagnostics"])
+    keys = {
+        "equity",
+        "gross_exposure",
+        "gross_exposure_pct",
+        "target_gross_exposure",
+        "selloff_target_gross_exposure",
+        "budget_used_pct",
+        "unused_budget_reason",
+        "candidates_count",
+        "approved_count",
+        "rejected_count",
+        "wait_count",
+        "shadow_count",
+        "selloff_budget_blockers",
+    }
+    return {key: event[key] for key in keys if key in event}
+
+
+def _latest_selloff_diagnostics(events: list[dict[str, object]]) -> dict[str, object]:
+    if not events:
+        return {}
+    ordered = sorted(
+        events,
+        key=lambda event: (
+            event["_timestamp"].timestamp()
+            if isinstance(event.get("_timestamp"), datetime)
+            else 0.0
+        ),
+    )
+    return _event_diagnostics(ordered[-1])
+
+
 def _review_pending_entry(review: dict[str, object]) -> dict[str, object]:
     metadata = review.get("entry_metadata", {})
     if not isinstance(metadata, dict):
@@ -1738,6 +1949,35 @@ def _render_markdown(payload: dict[str, object]) -> str:
                 for row in rows[:3]
             ]
             lines.append(f"- {label}: " + "; ".join(preview))
+
+    selloff = payload.get("selloff_capture_review", {})
+    if isinstance(selloff, dict):
+        lines.append("")
+        lines.append("## Selloff Capture Review")
+        lines.append(f"- Selloff windows: {selloff.get('selloff_windows', 0)}")
+        lines.append(f"- Candidates: {selloff.get('candidates_count', 0)}")
+        lines.append(f"- Trades opened: {selloff.get('trades_opened', 0)}")
+        lines.append(f"- Budget used: {selloff.get('budget_used_pct', 0.0)}")
+        lines.append(f"- Wait-only count: {selloff.get('wait_only_count_during_selloff', 0)}")
+
+    underallocation = payload.get("underallocation_review", {})
+    if isinstance(underallocation, dict):
+        lines.append("")
+        lines.append("## Underallocation Review")
+        lines.append(f"- Underallocated events: {underallocation.get('selloff_underallocated_count', 0)}")
+        lines.append(f"- Avg budget used: {underallocation.get('avg_budget_used_pct', 0.0)}")
+        lines.append(f"- Max budget used: {underallocation.get('max_budget_used_pct', 0.0)}")
+        reasons = underallocation.get("reasons_for_unused_budget", {})
+        if isinstance(reasons, dict) and reasons:
+            lines.append("- Reasons: " + "; ".join(f"{key}: {value}" for key, value in reasons.items()))
+
+    selloff_long = payload.get("long_during_selloff_review", {})
+    if isinstance(selloff_long, dict):
+        lines.append("")
+        lines.append("## Long During Selloff Review")
+        lines.append(f"- Long signals: {selloff_long.get('long_signals_during_selloff', 0)}")
+        lines.append(f"- Long shadow count: {selloff_long.get('long_shadow_count', 0)}")
+        lines.append(f"- Capitulation bounce probes: {selloff_long.get('capitulation_bounce_probes', 0)}")
 
     lines.append("")
     lines.append("## Recommendations")

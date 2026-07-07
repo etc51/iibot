@@ -52,9 +52,16 @@ def test_focused_runtime_matches_project_goal():
     assert config.learning_caps.same_entry_mode_cap_behavior == "shadow_only"
     assert config.learning_caps.same_regime_cap_behavior == "reduce_size"
     assert config.learning_caps.same_regime_cap_multiplier == 0.50
+    assert config.paper_alpha_capture.enabled is True
+    assert config.paper_alpha_capture.profile == "aggressive_paper_alpha"
+    assert config.paper_alpha_capture.target_gross_exposure_selloff == 1.00
     assert config.regime_policy.weak_down_choppy.short_direct_probe_enabled is True
-    assert config.regime_policy.weak_down_choppy.short_direct_probe_min_signal_strength == 0.20
-    assert config.regime_policy.weak_down_choppy.short_direct_probe_multiplier == 0.25
+    assert config.regime_policy.weak_down_choppy.short_direct_probe_min_signal_strength == 0.15
+    assert config.regime_policy.weak_down_choppy.short_direct_exploration_min_signal_strength == 0.08
+    assert config.regime_policy.weak_down_choppy.short_direct_probe_multiplier == 0.40
+    assert config.regime_policy.weak_down_choppy.short_direct_exploration_multiplier == 0.25
+    assert config.regime_policy.weak_down_choppy.short_direct_probe_max_soft_issues == 8
+    assert config.regime_policy.weak_down_choppy.allow_ml_negative_edge_exploration is True
     assert config.regime_policy.weak_down_choppy.create_pullback_addon_after_direct_probe is True
     assert config.regime_policy.weak_down_choppy.pullback_addon_multiplier == 0.15
     assert config.regime_policy.weak_down_choppy.long.allow_normal_long is False
@@ -62,16 +69,23 @@ def test_focused_runtime_matches_project_goal():
     assert config.side_policy.long.full_size_long_requires_clean_uptrend is True
     assert config.side_policy.long.exploration_risk_multiplier == 0.05
     assert config.market_selloff_impulse.basket.enabled is True
-    assert config.market_selloff_impulse.basket.max_new_shorts_per_cycle == 8
-    assert config.market_selloff_impulse.basket.max_selloff_positions == 10
+    assert config.market_selloff_impulse.basket.max_new_shorts_per_cycle == 12
+    assert config.market_selloff_impulse.basket.max_selloff_positions == 12
     assert config.market_selloff_impulse.basket.per_symbol_risk_multiplier == 0.15
-    assert config.market_selloff_impulse.basket.max_total_selloff_risk == 0.015
-    assert config.market_selloff_impulse.basket.min_symbols_to_trade == 2
-    assert config.market_selloff_impulse.basket.max_symbols_to_trade == 10
+    assert config.market_selloff_impulse.basket.per_symbol_exposure_target == 0.08
+    assert config.market_selloff_impulse.basket.max_total_selloff_gross_exposure == 1.00
+    assert config.market_selloff_impulse.basket.max_total_selloff_risk == 0.03
+    assert config.market_selloff_impulse.basket.min_symbols_to_trade == 4
+    assert config.market_selloff_impulse.basket.max_symbols_to_trade == 12
+    assert config.market_selloff_impulse.risk.market_breakdown_short_multiplier == 0.60
+    assert config.confirmation_5m.market_selloff_impulse.min_bars == 1
+    assert config.confirmation_5m.market_selloff_impulse.neutral_confirmation_mode == "allow_reduced_short"
+    assert config.learning_microstructure.market_selloff_impulse.max_entry_spread_bps_normal == 20.0
     assert config.market_selloff_impulse.learning_caps.max_same_symbol_selloff_trades_per_day == 2
     assert config.market_selloff_impulse.learning_caps.max_same_entry_mode_selloff_trades_per_day == 20
     assert config.market_selloff_impulse.learning_caps.max_same_regime_selloff_trades_per_day == 35
     assert config.market_selloff_impulse.long.allow_normal_long is False
+    assert config.market_selloff_impulse.long.capitulation_bounce_probe_multiplier == 0.05
     assert config.backtest.initial_cash == 300_000
     assert effective_target_daily_profit_rub(config.research, config.backtest) == 2_000.0
     assert effective_target_monthly_profit_rub(config.research, config.backtest) == 40_000.0
@@ -166,3 +180,24 @@ def test_explicit_user_exploration_cap_config_is_respected(tmp_path: Path):
     assert config.learning_risk.exploration.max_positions == 6
     assert config.learning_risk.exploration.max_trades_per_day == 18
     assert config.learning_risk.exploration.max_new_trades_per_cycle == 3
+
+
+def test_aggressive_paper_alpha_disabled_outside_local_paper(tmp_path: Path):
+    config = load_config(
+        _write_config(
+            tmp_path,
+            "\n".join(
+                [
+                    "[paper_alpha_capture]",
+                    "enabled = true",
+                    "",
+                    "[execution]",
+                    'mode = "tbank-sandbox"',
+                    "allow_live_trading = false",
+                ]
+            ),
+        )
+    )
+
+    assert config.paper_alpha_capture.enabled is False
+    assert config.execution.allow_live_trading is False

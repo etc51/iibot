@@ -253,6 +253,9 @@ class LearningMicrostructureSection:
             min_entry_book_imbalance=-0.80,
         )
     )
+    market_selloff_impulse: "MarketSelloffMicrostructureSection" = field(
+        default_factory=lambda: MarketSelloffMicrostructureSection()
+    )
 
 
 @dataclass(frozen=True)
@@ -264,6 +267,16 @@ class MlLearningPolicySection:
 
 
 @dataclass(frozen=True)
+class Confirmation5mMarketSelloffImpulseSection:
+    min_bars: int = 1
+    allow_same_bar_breakdown: bool = True
+    neutral_confirmation_mode: str = "allow_reduced_short"
+    mild_rebound_against_short_mode: str = "allow_reduced_short"
+    strong_rebound_against_short_mode: str = "stop_chase_wait_pullback"
+    extreme_adverse_mode: str = "shadow_or_reject"
+
+
+@dataclass(frozen=True)
 class Confirmation5mPolicySection:
     neutral_confirmation_mode: str = "probe"
     mild_rebound_against_short_mode: str = "exploration_or_wait"
@@ -272,6 +285,9 @@ class Confirmation5mPolicySection:
     mild_adverse_ret: float = 0.0025
     strong_adverse_ret: float = 0.005
     extreme_adverse_ret: float = 0.012
+    market_selloff_impulse: Confirmation5mMarketSelloffImpulseSection = field(
+        default_factory=Confirmation5mMarketSelloffImpulseSection
+    )
 
 
 @dataclass(frozen=True)
@@ -288,14 +304,15 @@ class WeakDownChoppyRegimePolicySection:
     enable_probe_now_with_pending_addon: bool = True
     short_direct_probe_enabled: bool = True
     short_direct_exploration_enabled: bool = True
-    short_direct_probe_min_signal_strength: float = 0.20
-    short_direct_exploration_min_signal_strength: float = 0.12
-    short_direct_probe_max_soft_issues: int = 4
-    short_direct_probe_multiplier: float = 0.25
-    short_direct_exploration_multiplier: float = 0.10
+    short_direct_probe_min_signal_strength: float = 0.15
+    short_direct_exploration_min_signal_strength: float = 0.08
+    short_direct_probe_max_soft_issues: int = 8
+    short_direct_probe_multiplier: float = 0.40
+    short_direct_exploration_multiplier: float = 0.25
     create_pullback_addon_after_direct_probe: bool = True
     pullback_addon_multiplier: float = 0.15
     strict_policy_keeps_wait_pullback: bool = True
+    allow_ml_negative_edge_exploration: bool = True
     short_confirmation: WeakDownChoppyShortConfirmationSection = field(
         default_factory=WeakDownChoppyShortConfirmationSection
     )
@@ -305,10 +322,10 @@ class WeakDownChoppyRegimePolicySection:
 @dataclass(frozen=True)
 class CleanUptrendLongPolicySection:
     allow_direct_trend_long: bool = True
-    long_direct_probe_min_signal_strength: float = 0.20
-    long_direct_normal_min_signal_strength: float = 0.35
-    long_probe_multiplier: float = 0.15
-    long_normal_multiplier: float = 0.25
+    long_direct_probe_min_signal_strength: float = 0.15
+    long_direct_normal_min_signal_strength: float = 0.30
+    long_probe_multiplier: float = 0.20
+    long_normal_multiplier: float = 0.35
 
 
 @dataclass(frozen=True)
@@ -332,8 +349,8 @@ class WeakDownChoppyLongPolicySection:
     allow_normal_long: bool = False
     allow_rebound_probe_long: bool = True
     allow_rebound_exploration_long: bool = True
-    long_probe_multiplier: float = 0.05
-    long_exploration_multiplier: float = 0.03
+    long_probe_multiplier: float = 0.06
+    long_exploration_multiplier: float = 0.04
     require_strong_rebound_or_failed_breakdown: bool = True
     default_long_mode: str = "shadow_only"
 
@@ -342,7 +359,7 @@ class WeakDownChoppyLongPolicySection:
 class MarketSelloffLongPolicySection:
     allow_normal_long: bool = False
     allow_capitulation_bounce_probe: bool = True
-    capitulation_bounce_probe_multiplier: float = 0.03
+    capitulation_bounce_probe_multiplier: float = 0.05
     default_long_mode: str = "shadow_or_tiny_probe"
     require_reclaim_confirmation: bool = True
 
@@ -430,13 +447,37 @@ class SymbolHealthPolicySection:
 @dataclass(frozen=True)
 class MarketSelloffBasketSection:
     enabled: bool = True
-    max_new_shorts_per_cycle: int = 8
-    max_selloff_positions: int = 10
+    max_new_shorts_per_cycle: int = 12
+    max_selloff_positions: int = 12
     per_symbol_risk_multiplier: float = 0.15
-    max_total_selloff_risk: float = 0.015
+    per_symbol_exposure_target: float = 0.08
+    per_symbol_exposure_max: float = 0.12
+    max_total_selloff_gross_exposure: float = 1.00
+    max_total_selloff_risk: float = 0.03
     prefer_liquid_symbols: bool = True
-    min_symbols_to_trade: int = 2
-    max_symbols_to_trade: int = 10
+    min_symbols_to_trade: int = 4
+    max_symbols_to_trade: int = 12
+
+
+@dataclass(frozen=True)
+class MarketSelloffRiskSection:
+    market_breakdown_short_multiplier: float = 0.60
+    selloff_momentum_short_multiplier: float = 0.45
+    panic_probe_short_multiplier: float = 0.25
+    post_selloff_failed_rebound_short_multiplier: float = 0.35
+
+
+@dataclass(frozen=True)
+class MarketSelloffMicrostructureSection:
+    max_entry_spread_bps_normal: float = 20.0
+    max_entry_spread_bps_probe: float = 32.0
+    max_entry_spread_bps_exploration: float = 40.0
+    min_entry_liquidity_cover_normal: float = 1.0
+    min_entry_liquidity_cover_probe: float = 0.6
+    min_entry_liquidity_cover_exploration: float = 0.4
+    min_entry_book_imbalance_normal: float = -0.60
+    min_entry_book_imbalance_probe: float = -0.85
+    min_entry_book_imbalance_exploration: float = -0.95
 
 
 @dataclass(frozen=True)
@@ -453,8 +494,23 @@ class MarketSelloffLearningCapsSection:
 @dataclass(frozen=True)
 class MarketSelloffImpulseSection:
     basket: MarketSelloffBasketSection = field(default_factory=MarketSelloffBasketSection)
+    risk: MarketSelloffRiskSection = field(default_factory=MarketSelloffRiskSection)
     learning_caps: MarketSelloffLearningCapsSection = field(default_factory=MarketSelloffLearningCapsSection)
     long: MarketSelloffLongPolicySection = field(default_factory=MarketSelloffLongPolicySection)
+
+
+@dataclass(frozen=True)
+class PaperAlphaCaptureSection:
+    enabled: bool = False
+    profile: str = "aggressive_paper_alpha"
+    use_full_paper_budget: bool = True
+    target_gross_exposure_normal: float = 0.40
+    target_gross_exposure_selloff: float = 1.00
+    max_gross_exposure_selloff: float = 1.25
+    min_cash_reserve_selloff: float = 0.03
+    allow_budget_ramp: bool = True
+    budget_ramp_step_per_cycle: float = 0.25
+    do_not_wait_for_pullback_in_broad_selloff: bool = True
 
 
 @dataclass(frozen=True)
@@ -534,6 +590,7 @@ class AppConfig:
     side_policy: SidePolicySection = field(default_factory=SidePolicySection)
     symbol_health_policy: SymbolHealthPolicySection = field(default_factory=SymbolHealthPolicySection)
     market_selloff_impulse: MarketSelloffImpulseSection = field(default_factory=MarketSelloffImpulseSection)
+    paper_alpha_capture: PaperAlphaCaptureSection = field(default_factory=PaperAlphaCaptureSection)
 
     def resolve_path(self, value: str) -> Path:
         path = Path(value)
@@ -636,6 +693,25 @@ def _parse_mode_microstructure(
 ) -> ModeMicrostructureSection:
     values = {**default.__dict__, **_dataclass_payload(ModeMicrostructureSection, payload)}
     return ModeMicrostructureSection(**values)
+
+
+def _parse_confirmation_5m_policy(payload: dict[str, Any] | None) -> Confirmation5mPolicySection:
+    default = Confirmation5mPolicySection()
+    raw = payload if isinstance(payload, dict) else {}
+    values = {
+        **default.__dict__,
+        **_dataclass_payload(Confirmation5mPolicySection, raw),
+    }
+    values["market_selloff_impulse"] = Confirmation5mMarketSelloffImpulseSection(
+        **{
+            **default.market_selloff_impulse.__dict__,
+            **_dataclass_payload(
+                Confirmation5mMarketSelloffImpulseSection,
+                raw.get("market_selloff_impulse", {}) if isinstance(raw.get("market_selloff_impulse"), dict) else {},
+            ),
+        }
+    )
+    return Confirmation5mPolicySection(**values)
 
 
 def _parse_weak_down_choppy_policy(payload: dict[str, Any] | None) -> WeakDownChoppyRegimePolicySection:
@@ -769,13 +845,22 @@ def load_config(config_path: str | Path) -> AppConfig:
             microstructure_raw.get("exploration", {}) if isinstance(microstructure_raw, dict) else {},
             default_learning_microstructure.exploration,
         ),
+        market_selloff_impulse=MarketSelloffMicrostructureSection(
+            **{
+                **default_learning_microstructure.market_selloff_impulse.__dict__,
+                **_dataclass_payload(
+                    MarketSelloffMicrostructureSection,
+                    microstructure_raw.get("market_selloff_impulse", {})
+                    if isinstance(microstructure_raw, dict)
+                    else {},
+                ),
+            }
+        ),
     )
     ml_learning_policy = MlLearningPolicySection(
         **_dataclass_payload(MlLearningPolicySection, raw.get("ml_learning", {}))
     )
-    confirmation_5m = Confirmation5mPolicySection(
-        **_dataclass_payload(Confirmation5mPolicySection, raw.get("confirmation_5m", {}))
-    )
+    confirmation_5m = _parse_confirmation_5m_policy(raw.get("confirmation_5m", {}))
     side_raw = raw.get("side", {})
     side_policy = SidePolicySection(
         long=LongSidePolicySection(
@@ -864,6 +949,15 @@ def load_config(config_path: str | Path) -> AppConfig:
                 ),
             }
         ),
+        risk=MarketSelloffRiskSection(
+            **{
+                **default_selloff.risk.__dict__,
+                **_dataclass_payload(
+                    MarketSelloffRiskSection,
+                    selloff_raw.get("risk", {}) if isinstance(selloff_raw, dict) else {},
+                ),
+            }
+        ),
         learning_caps=MarketSelloffLearningCapsSection(
             **{
                 **default_selloff.learning_caps.__dict__,
@@ -892,6 +986,15 @@ def load_config(config_path: str | Path) -> AppConfig:
         state_path=execution_raw.get("state_path", "state/paper_state.json"),
         allow_live_trading=bool(execution_raw.get("allow_live_trading", False)),
     )
+    paper_alpha_raw = raw.get("paper_alpha_capture", {})
+    default_paper_alpha = PaperAlphaCaptureSection()
+    paper_alpha_values = {
+        **default_paper_alpha.__dict__,
+        **_dataclass_payload(PaperAlphaCaptureSection, paper_alpha_raw if isinstance(paper_alpha_raw, dict) else {}),
+    }
+    if execution.mode != TradeMode.LOCAL_PAPER:
+        paper_alpha_values["enabled"] = False
+    paper_alpha_capture = PaperAlphaCaptureSection(**paper_alpha_values)
 
     backtest = BacktestSection(**raw.get("backtest", {}))
     reporting = ReportingSection(**raw.get("reporting", {}))
@@ -915,6 +1018,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         side_policy=side_policy,
         symbol_health_policy=symbol_health_policy,
         market_selloff_impulse=market_selloff_impulse,
+        paper_alpha_capture=paper_alpha_capture,
         execution=execution,
         backtest=backtest,
         reporting=reporting,
