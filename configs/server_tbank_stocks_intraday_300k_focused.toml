@@ -499,6 +499,79 @@ allow_ml_fallback_when_model_missing = true
 allow_price_action_fallback_when_ml_stale = true
 negative_ml_expected_edge_action = "no_trade"
 
+[short_ev_engine]
+enabled = true
+mode = "short_only_ev"
+allowed_setups = [
+  "normal_15m_trend_short",
+  "golden_15m_breakout_short",
+  "early_5m_acceleration_short",
+  "failed_rebound_short",
+  "market_selloff_short",
+]
+unknown_setup_action = "shadow_only"
+long_enabled = false
+range_chop_enabled = false
+live_enabled = false
+default_spread_cost_bps = 8.0
+
+[short_ev_engine.ev_gate]
+min_ev_net_rub = 10.0
+min_ev_per_risk = 0.05
+min_sample_count_for_real = 30
+min_confidence = 0.55
+allow_golden_baseline_prior = true
+unknown_setup_action = "shadow_only"
+negative_ev_action = "no_trade"
+insufficient_sample_action = "shadow_or_probe"
+
+[short_ev_engine.probe]
+enabled = true
+max_size_multiplier = 0.10
+max_probe_trades_per_day = 10
+probe_requires_ev_positive = true
+
+[short_ev_engine.exits.breakeven]
+enabled = true
+activation_mfe_pct = 0.0035
+activation_range_pct_min = 0.003
+activation_range_pct_max = 0.004
+buffer_bps = 2.0
+include_round_trip_costs = true
+apply_to_all_short_setups = true
+
+[short_ev_engine.exits.trailing]
+enabled = true
+activation_mfe_pct = 0.006
+atr_timeframe = "5min"
+atr_window = 14
+atr_multiple = 1.3
+use_local_5m_swing_high = true
+use_order_book_tightening = true
+
+[short_ev_engine.exits.order_book_tightening]
+enabled = true
+adverse_imbalance_threshold = -0.60
+spread_widen_bps = 18.0
+reclaim_5m_ema9_exit = true
+tighten_multiplier = 0.7
+
+[short_ev_engine.timeframes]
+primary = "15min"
+trigger = "5min"
+execution_guard = "1min"
+forbidden = ["10min"]
+
+[short_ev_engine.damage_guard]
+enabled = true
+daily_loss_limit_rub = 1500.0
+daily_loss_limit_pct = 0.005
+include_open_pnl = true
+action = "block_new_real_entries"
+allow_exits = true
+allow_shadow_candidates = true
+reset_next_session = true
+
 [short_only.sizing.market_selloff_impulse]
 target_gross_exposure = 1.00
 max_gross_exposure = 1.25

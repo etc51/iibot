@@ -131,6 +131,27 @@ def test_focused_runtime_matches_project_goal():
     assert config.short_only.damage_guard.daily_loss_limit_pct == 0.005
     assert config.short_only.damage_guard.include_open_pnl is True
     assert config.short_only.exits.early_loss_guard_enabled is True
+    assert config.short_ev_engine.enabled is True
+    assert config.short_ev_engine.mode == "short_only_ev"
+    assert config.short_ev_engine.allowed_setups == [
+        "normal_15m_trend_short",
+        "golden_15m_breakout_short",
+        "early_5m_acceleration_short",
+        "failed_rebound_short",
+        "market_selloff_short",
+    ]
+    assert config.short_ev_engine.long_enabled is False
+    assert config.short_ev_engine.range_chop_enabled is False
+    assert config.short_ev_engine.live_enabled is False
+    assert config.short_ev_engine.ev_gate.min_ev_net_rub == 10.0
+    assert config.short_ev_engine.ev_gate.min_ev_per_risk == 0.05
+    assert config.short_ev_engine.probe.max_size_multiplier == 0.10
+    assert config.short_ev_engine.exits.breakeven.activation_mfe_pct == 0.0035
+    assert config.short_ev_engine.exits.trailing.atr_timeframe == "5min"
+    assert config.short_ev_engine.timeframes.primary == "15min"
+    assert config.short_ev_engine.timeframes.trigger == "5min"
+    assert config.short_ev_engine.timeframes.execution_guard == "1min"
+    assert config.short_ev_engine.timeframes.forbidden == ["10min"]
     assert config.regime_policy.weak_down_choppy.short_direct_probe_enabled is True
     assert config.regime_policy.weak_down_choppy.short_direct_probe_min_signal_strength == 0.15
     assert config.regime_policy.weak_down_choppy.short_direct_exploration_min_signal_strength == 0.08
@@ -300,4 +321,26 @@ def test_short_only_disabled_outside_local_paper(tmp_path: Path):
     )
 
     assert config.short_only.enabled is False
+    assert config.execution.allow_live_trading is False
+
+
+def test_short_ev_engine_disabled_outside_local_paper(tmp_path: Path):
+    config = load_config(
+        _write_config(
+            tmp_path,
+            "\n".join(
+                [
+                    "[short_ev_engine]",
+                    "enabled = true",
+                    "",
+                    "[execution]",
+                    'mode = "tbank-sandbox"',
+                    "allow_live_trading = false",
+                ]
+            ),
+        )
+    )
+
+    assert config.short_ev_engine.enabled is False
+    assert config.short_ev_engine.live_enabled is False
     assert config.execution.allow_live_trading is False

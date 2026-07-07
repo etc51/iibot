@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from ..config import RiskSection, StrategySection
 from ..domain import PortfolioState, TradeRecord
 from ..runtime_metadata import with_runtime_metadata
+from .short_ev_engine import ALLOWED_SHORT_SETUPS, canonical_setup_id
 from .ml_learning import (
     COMMISSION_EDGE_TAG,
     CONFIRMATION_AFTER_IMPULSE_TAG,
@@ -98,6 +99,7 @@ def build_trade_review_payload(
         "policy_outcomes": _policy_outcomes(reviews),
         "weak_choppy_direct_probe_review": _weak_choppy_direct_probe_review(reviews, parsed_events),
         "short_only_review": _short_only_review(portfolio, reviews, parsed_events),
+        "short_ev_review": _short_ev_review(portfolio, reviews, parsed_events),
         "golden_3tf_review": _golden_3tf_review(reviews, parsed_events),
         "selloff_capture_review": _selloff_capture_review(reviews, parsed_events),
         "underallocation_review": _underallocation_review(parsed_events),
@@ -1344,6 +1346,172 @@ def _short_only_review(
     }
 
 
+def _short_ev_review(
+    portfolio: PortfolioState,
+    reviews: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    del portfolio
+    config_events = [event for event in events if event.get("action") == "short_ev_engine_config"]
+    latest_config = config_events[-1] if config_events else {}
+    allowed = latest_config.get("allowed_setups", list(ALLOWED_SHORT_SETUPS))
+    if not isinstance(allowed, list):
+        allowed = list(ALLOWED_SHORT_SETUPS)
+    allowed_setups = [canonical_setup_id(item) for item in allowed if canonical_setup_id(item)]
+    candidate_events = [
+        event
+        for event in events
+        if event.get("action") in {"short_only_short_candidate", "short_only_upsize_candidate"}
+        and _event_short_only(event).get("short_ev_engine_enabled") is True
+    ]
+    signal_events = [
+        event
+        for event in events
+        if event.get("action") == "signal" and _event_short_only(event).get("short_ev_engine_enabled") is True
+    ]
+    short_ev_reviews = [
+        review
+        for review in reviews
+        if _review_short_ev_engine(review)
+        or canonical_setup_id(_review_short_only(review).get("setup_id", "")) in set(allowed_setups)
+    ]
+    shadow_events = [
+        event
+        for event in events
+        if "shadow" in str(event.get("action", ""))
+        and _event_short_only(event).get("short_ev_engine_enabled") is True
+    ]
+    setup_registry = []
+    ev_by_setup = []
+    for setup_id in allowed_setups:
+        setup_candidates = [event for event in candidate_events if _event_setup_id(event) == setup_id]
+        setup_signals = [event for event in signal_events if _event_setup_id(event) == setup_id]
+        setup_reviews = [review for review in short_ev_reviews if _review_setup_id(review) == setup_id]
+        real_count = sum(
+            1
+            for event in setup_signals
+            if bool(event.get("approved", False))
+            and _event_short_only(event).get("short_ev_decision") == "real_allowed"
+        )
+        probe_count = sum(
+            1
+            for event in setup_signals
+            if bool(event.get("approved", False))
+            and _event_short_only(event).get("short_ev_decision") == "probe_allowed"
+        )
+        shadow_count = sum(1 for event in setup_signals if not bool(event.get("approved", False)))
+        setup_registry.append(
+            {
+                "setup_id": setup_id,
+                "enabled_real": True,
+                "enabled_probe": True,
+                "enabled_shadow": True,
+                "candidate_count": len(setup_candidates),
+                "real_count": real_count,
+                "probe_count": probe_count,
+                "shadow_count": shadow_count,
+            }
+        )
+        pnl = _pnl_for_reviews(setup_reviews)
+        ev_rows = [_event_short_only(event) for event in setup_candidates]
+        avg_ev = _avg([_float(row.get("ev_net_rub")) for row in ev_rows])
+        avg_ev_per_risk = _avg([_float(row.get("ev_per_risk")) for row in ev_rows])
+        avg_cost = _avg(
+            [
+                _float(row.get("costs", {}).get("total_cost_rub"))
+                for row in ev_rows
+                if isinstance(row.get("costs", {}), dict)
+            ]
+        )
+        avg_confidence = _avg([_float(row.get("ev_confidence")) for row in ev_rows])
+        wins = int(pnl.get("wins", 0)) if isinstance(pnl, dict) else 0
+        losses = int(pnl.get("losses", 0)) if isinstance(pnl, dict) else 0
+        trades = int(pnl.get("trades", 0)) if isinstance(pnl, dict) else 0
+        ev_by_setup.append(
+            {
+                "setup_id": setup_id,
+                "trades": trades,
+                "wins": wins,
+                "losses": losses,
+                "win_rate": round(wins / trades, 6) if trades else 0.0,
+                "avg_win_net": _avg([float(review.get("net_pnl_rub", 0.0)) for review in setup_reviews if float(review.get("net_pnl_rub", 0.0)) > 0]),
+                "avg_loss_net": _avg([float(review.get("net_pnl_rub", 0.0)) for review in setup_reviews if float(review.get("net_pnl_rub", 0.0)) < 0]),
+                "ev_net": round(avg_ev, 2),
+                "ev_per_risk": round(avg_ev_per_risk, 6),
+                "costs_avg": round(avg_cost, 2),
+                "confidence": round(avg_confidence, 6),
+                "real_enabled_reason": _setup_real_enabled_reason(setup_candidates, setup_reviews),
+                "pnl": pnl,
+                "avg_mfe_pct": _avg([_review_mfe_pct(review) for review in setup_reviews]),
+                "avg_mae_pct": _avg([_review_mae_pct(review) for review in setup_reviews]),
+            }
+        )
+    cost_rows = [
+        _event_short_only(event).get("costs", {})
+        for event in candidate_events
+        if isinstance(_event_short_only(event).get("costs", {}), dict)
+    ]
+    gross_pnl = sum(abs(float(review.get("gross_pnl_rub", 0.0) or 0.0)) for review in short_ev_reviews)
+    costs_total = {
+        "commission_total": round(
+            sum(_float(row.get("entry_commission_rub")) + _float(row.get("exit_commission_rub")) for row in cost_rows),
+            2,
+        ),
+        "spread_cost_total": round(sum(_float(row.get("spread_cost_rub")) for row in cost_rows), 2),
+        "slippage_total": round(sum(_float(row.get("slippage_cost_rub")) for row in cost_rows), 2),
+    }
+    total_costs = sum(float(value) for value in costs_total.values())
+    costs_total["costs_as_pct_of_gross"] = round(total_costs / gross_pnl * 100.0, 4) if gross_pnl > 0 else 0.0
+    return {
+        "enabled": bool(config_events or candidate_events or short_ev_reviews),
+        "mode": latest_config.get("mode", ""),
+        "allow_live_trading": latest_config.get("allow_live_trading"),
+        "execution_mode": latest_config.get("execution_mode"),
+        "allowed_setups": allowed_setups,
+        "setup_registry": setup_registry,
+        "ev_by_setup": ev_by_setup,
+        "entry_source": {
+            setup_id: sum(1 for event in candidate_events if _event_setup_id(event) == setup_id)
+            for setup_id in allowed_setups
+        },
+        "exit_performance": {
+            "breakeven_armed_count": sum(1 for event in events if event.get("action") == "short_net_breakeven_armed"),
+            "breakeven_saved_losses": sum(
+                1
+                for review in short_ev_reviews
+                if str(review.get("exit_reason", "")) in {"breakeven-stop", "profit-protect-stop"}
+            ),
+            "trailing_activated_count": sum(1 for event in events if event.get("action") == "short_ev_trailing_stop_updated"),
+            "trailing_exit_pnl": _pnl_for_reviews(
+                [
+                    review
+                    for review in short_ev_reviews
+                    if str(review.get("exit_reason", "")) in {"profit-protect-stop", "take-profit-runner"}
+                ]
+            ),
+            "order_book_tightening_count": sum(1 for event in events if event.get("action") == "short_ev_order_book_tightening"),
+            "full_risk_loss_count": sum(1 for review in short_ev_reviews if str(review.get("exit_reason", "")) == "stop-loss"),
+            "fast_loss_count": sum(1 for review in short_ev_reviews if "fast" in str(review.get("exit_reason", ""))),
+        },
+        "costs": costs_total,
+        "shadow_validation": {
+            "shadow_count": len(shadow_events),
+            "shadow_by_setup": dict(sorted(Counter(_event_setup_id(event) for event in shadow_events).items())),
+            "setups_close_to_real_enable": [
+                row["setup_id"]
+                for row in ev_by_setup
+                if float(row.get("ev_net", 0.0) or 0.0) > 0 and float(row.get("confidence", 0.0) or 0.0) < 0.55
+            ],
+            "setups_to_disable": [
+                row["setup_id"]
+                for row in ev_by_setup
+                if int(row.get("trades", 0) or 0) >= 10 and float(row.get("ev_net", 0.0) or 0.0) < 0
+            ],
+        },
+        "what_to_change_next": _short_ev_recommendations(ev_by_setup),
+    }
+
+
 def _golden_3tf_review(
     reviews: list[dict[str, object]],
     events: list[dict[str, object]],
@@ -1911,6 +2079,117 @@ def _event_short_only(event: dict[str, object]) -> dict[str, object]:
         return {}
     short_only = metadata.get("short_only", {})
     return dict(short_only) if isinstance(short_only, dict) else {}
+
+
+def _review_short_only(review: dict[str, object]) -> dict[str, object]:
+    metadata = review.get("entry_metadata", {})
+    if not isinstance(metadata, dict):
+        return {}
+    short_only = metadata.get("short_only", {})
+    return dict(short_only) if isinstance(short_only, dict) else {}
+
+
+def _review_short_ev_engine(review: dict[str, object]) -> dict[str, object]:
+    metadata = review.get("entry_metadata", {})
+    if not isinstance(metadata, dict):
+        return {}
+    engine = metadata.get("short_ev_engine", {})
+    return dict(engine) if isinstance(engine, dict) else {}
+
+
+def _event_setup_id(event: dict[str, object]) -> str:
+    short_only = _event_short_only(event)
+    return canonical_setup_id(short_only.get("setup_id", ""))
+
+
+def _review_setup_id(review: dict[str, object]) -> str:
+    engine = _review_short_ev_engine(review)
+    if engine.get("setup_id"):
+        return canonical_setup_id(engine.get("setup_id"))
+    short_only = _review_short_only(review)
+    return canonical_setup_id(short_only.get("setup_id", short_only.get("entry_mode", "")))
+
+
+def _avg(values: list[float | None]) -> float:
+    clean = [float(value) for value in values if value is not None and math.isfinite(float(value))]
+    return sum(clean) / len(clean) if clean else 0.0
+
+
+def _float(value: object) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return result if math.isfinite(result) else 0.0
+
+
+def _review_mfe_pct(review: dict[str, object]) -> float | None:
+    entry = _float(review.get("entry_price"))
+    mfe = _float(review.get("mfe_price"))
+    if entry <= 0 or mfe <= 0:
+        return None
+    if str(review.get("direction", "")) == "short":
+        return max(0.0, (entry - mfe) / entry)
+    return max(0.0, (mfe - entry) / entry)
+
+
+def _review_mae_pct(review: dict[str, object]) -> float | None:
+    entry = _float(review.get("entry_price"))
+    mae = _float(review.get("mae_price"))
+    if entry <= 0 or mae <= 0:
+        return None
+    if str(review.get("direction", "")) == "short":
+        return max(0.0, (mae - entry) / entry)
+    return max(0.0, (entry - mae) / entry)
+
+
+def _setup_real_enabled_reason(
+    setup_candidates: list[dict[str, object]],
+    setup_reviews: list[dict[str, object]],
+) -> str:
+    if setup_reviews:
+        return "closed_trade_stats_available"
+    for event in setup_candidates:
+        reason = str(_event_short_only(event).get("short_ev_reason", ""))
+        if reason:
+            return reason
+    return "waiting_for_candidates"
+
+
+def _short_ev_recommendations(ev_by_setup: list[dict[str, object]]) -> list[dict[str, object]]:
+    recommendations: list[dict[str, object]] = []
+    for row in ev_by_setup:
+        setup_id = str(row.get("setup_id", ""))
+        trades = int(row.get("trades", 0) or 0)
+        ev_net = float(row.get("ev_net", 0.0) or 0.0)
+        confidence = float(row.get("confidence", 0.0) or 0.0)
+        if trades >= 10 and ev_net < 0:
+            recommendations.append(
+                {
+                    "action": "disable-negative-setup",
+                    "setup_id": setup_id,
+                    "reason": f"{setup_id} has {trades} trades and EV {ev_net:.2f} RUB",
+                }
+            )
+        elif ev_net > 0 and confidence < 0.55:
+            recommendations.append(
+                {
+                    "action": "keep-shadow-until-confidence",
+                    "setup_id": setup_id,
+                    "reason": f"{setup_id} EV {ev_net:.2f} RUB but confidence {confidence:.2f}",
+                }
+            )
+        elif trades == 0:
+            recommendations.append(
+                {
+                    "action": "collect-shadow-samples",
+                    "setup_id": setup_id,
+                    "reason": f"{setup_id} has no closed setup stats yet",
+                }
+            )
+        if len(recommendations) >= 5:
+            break
+    return recommendations
 
 
 def _event_golden_3tf(event: dict[str, object]) -> dict[str, object]:
@@ -2566,6 +2845,31 @@ def _render_markdown(payload: dict[str, object]) -> str:
         lines.append(f"- Shorts opened: {short_only.get('shorts_opened', 0)}")
         lines.append(f"- Budget used: {short_only.get('budget_used', 0.0)} / {short_only.get('budget_target', 0.0)}")
         lines.append(f"- Underallocated events: {short_only.get('underallocated_count', 0)}")
+
+    short_ev = payload.get("short_ev_review", {})
+    if isinstance(short_ev, dict) and short_ev.get("enabled"):
+        lines.append("")
+        lines.append("## Short EV Review")
+        lines.append(f"- Mode: {short_ev.get('mode', '')}")
+        lines.append(f"- Execution: {short_ev.get('execution_mode', '')}, live={short_ev.get('allow_live_trading')}")
+        rows = short_ev.get("ev_by_setup", [])
+        if isinstance(rows, list):
+            for row in rows[:5]:
+                if isinstance(row, dict):
+                    lines.append(
+                        "- "
+                        f"{row.get('setup_id')}: EV {row.get('ev_net')} RUB, "
+                        f"confidence {row.get('confidence')}, trades {row.get('trades')}, "
+                        f"costs avg {row.get('costs_avg')} RUB"
+                    )
+        exits = short_ev.get("exit_performance", {})
+        if isinstance(exits, dict):
+            lines.append(
+                "- Exits: "
+                f"BE {exits.get('breakeven_armed_count', 0)}, "
+                f"trailing {exits.get('trailing_activated_count', 0)}, "
+                f"book tightening {exits.get('order_book_tightening_count', 0)}"
+            )
 
     golden = payload.get("golden_3tf_review", {})
     if isinstance(golden, dict) and golden.get("enabled"):

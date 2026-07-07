@@ -528,6 +528,111 @@ class ShortOnlyEdgeSection:
 
 
 @dataclass(frozen=True)
+class ShortEvEngineEvGateSection:
+    min_ev_net_rub: float = 10.0
+    min_ev_per_risk: float = 0.05
+    min_sample_count_for_real: int = 30
+    min_confidence: float = 0.55
+    allow_golden_baseline_prior: bool = True
+    unknown_setup_action: str = "shadow_only"
+    negative_ev_action: str = "no_trade"
+    insufficient_sample_action: str = "shadow_or_probe"
+
+
+@dataclass(frozen=True)
+class ShortEvEngineProbeSection:
+    enabled: bool = True
+    max_size_multiplier: float = 0.10
+    max_probe_trades_per_day: int = 10
+    probe_requires_ev_positive: bool = True
+
+
+@dataclass(frozen=True)
+class ShortEvBreakevenExitSection:
+    enabled: bool = True
+    activation_mfe_pct: float = 0.0035
+    activation_range_pct_min: float = 0.003
+    activation_range_pct_max: float = 0.004
+    buffer_bps: float = 2.0
+    include_round_trip_costs: bool = True
+    apply_to_all_short_setups: bool = True
+
+
+@dataclass(frozen=True)
+class ShortEvOrderBookTighteningSection:
+    enabled: bool = True
+    adverse_imbalance_threshold: float = -0.60
+    spread_widen_bps: float = 18.0
+    reclaim_5m_ema9_exit: bool = True
+    tighten_multiplier: float = 0.7
+
+
+@dataclass(frozen=True)
+class ShortEvTrailingExitSection:
+    enabled: bool = True
+    activation_mfe_pct: float = 0.006
+    atr_timeframe: str = "5min"
+    atr_window: int = 14
+    atr_multiple: float = 1.3
+    use_local_5m_swing_high: bool = True
+    use_order_book_tightening: bool = True
+
+
+@dataclass(frozen=True)
+class ShortEvExitsSection:
+    breakeven: ShortEvBreakevenExitSection = field(default_factory=ShortEvBreakevenExitSection)
+    trailing: ShortEvTrailingExitSection = field(default_factory=ShortEvTrailingExitSection)
+    order_book_tightening: ShortEvOrderBookTighteningSection = field(
+        default_factory=ShortEvOrderBookTighteningSection
+    )
+
+
+@dataclass(frozen=True)
+class ShortEvTimeframesSection:
+    primary: str = "15min"
+    trigger: str = "5min"
+    execution_guard: str = "1min"
+    forbidden: list[str] = field(default_factory=lambda: ["10min"])
+
+
+@dataclass(frozen=True)
+class ShortEvDamageGuardSection:
+    enabled: bool = True
+    daily_loss_limit_rub: float = 1500.0
+    daily_loss_limit_pct: float = 0.005
+    include_open_pnl: bool = True
+    action: str = "block_new_real_entries"
+    allow_exits: bool = True
+    allow_shadow_candidates: bool = True
+    reset_next_session: bool = True
+
+
+@dataclass(frozen=True)
+class ShortEvEngineSection:
+    enabled: bool = False
+    mode: str = "short_only_ev"
+    allowed_setups: list[str] = field(
+        default_factory=lambda: [
+            "normal_15m_trend_short",
+            "golden_15m_breakout_short",
+            "early_5m_acceleration_short",
+            "failed_rebound_short",
+            "market_selloff_short",
+        ]
+    )
+    unknown_setup_action: str = "shadow_only"
+    long_enabled: bool = False
+    range_chop_enabled: bool = False
+    live_enabled: bool = False
+    default_spread_cost_bps: float = 8.0
+    ev_gate: ShortEvEngineEvGateSection = field(default_factory=ShortEvEngineEvGateSection)
+    probe: ShortEvEngineProbeSection = field(default_factory=ShortEvEngineProbeSection)
+    exits: ShortEvExitsSection = field(default_factory=ShortEvExitsSection)
+    timeframes: ShortEvTimeframesSection = field(default_factory=ShortEvTimeframesSection)
+    damage_guard: ShortEvDamageGuardSection = field(default_factory=ShortEvDamageGuardSection)
+
+
+@dataclass(frozen=True)
 class ShortOnlySizingRegimeSection:
     target_gross_exposure: float = 0.0
     max_gross_exposure: float = 0.0
@@ -939,6 +1044,7 @@ class AppConfig:
     market_selloff_impulse: MarketSelloffImpulseSection = field(default_factory=MarketSelloffImpulseSection)
     paper_alpha_capture: PaperAlphaCaptureSection = field(default_factory=PaperAlphaCaptureSection)
     short_only: ShortOnlySection = field(default_factory=ShortOnlySection)
+    short_ev_engine: ShortEvEngineSection = field(default_factory=ShortEvEngineSection)
     golden_baseline: GoldenBaselineSection = field(default_factory=GoldenBaselineSection)
 
     def resolve_path(self, value: str) -> Path:
@@ -1353,6 +1459,89 @@ def _parse_short_only(payload: dict[str, Any] | None, *, execution_mode: TradeMo
     return ShortOnlySection(**values)
 
 
+def _parse_short_ev_engine(payload: dict[str, Any] | None, *, execution_mode: TradeMode) -> ShortEvEngineSection:
+    default = ShortEvEngineSection()
+    raw = payload if isinstance(payload, dict) else {}
+    values = {
+        **default.__dict__,
+        **_dataclass_payload(ShortEvEngineSection, raw),
+    }
+    values["ev_gate"] = ShortEvEngineEvGateSection(
+        **{
+            **default.ev_gate.__dict__,
+            **_dataclass_payload(
+                ShortEvEngineEvGateSection,
+                raw.get("ev_gate", {}) if isinstance(raw.get("ev_gate"), dict) else {},
+            ),
+        }
+    )
+    values["probe"] = ShortEvEngineProbeSection(
+        **{
+            **default.probe.__dict__,
+            **_dataclass_payload(
+                ShortEvEngineProbeSection,
+                raw.get("probe", {}) if isinstance(raw.get("probe"), dict) else {},
+            ),
+        }
+    )
+    exits_raw = raw.get("exits", {}) if isinstance(raw.get("exits"), dict) else {}
+    default_exits = default.exits
+    values["exits"] = ShortEvExitsSection(
+        breakeven=ShortEvBreakevenExitSection(
+            **{
+                **default_exits.breakeven.__dict__,
+                **_dataclass_payload(
+                    ShortEvBreakevenExitSection,
+                    exits_raw.get("breakeven", {}) if isinstance(exits_raw.get("breakeven"), dict) else {},
+                ),
+            }
+        ),
+        trailing=ShortEvTrailingExitSection(
+            **{
+                **default_exits.trailing.__dict__,
+                **_dataclass_payload(
+                    ShortEvTrailingExitSection,
+                    exits_raw.get("trailing", {}) if isinstance(exits_raw.get("trailing"), dict) else {},
+                ),
+            }
+        ),
+        order_book_tightening=ShortEvOrderBookTighteningSection(
+            **{
+                **default_exits.order_book_tightening.__dict__,
+                **_dataclass_payload(
+                    ShortEvOrderBookTighteningSection,
+                    exits_raw.get("order_book_tightening", {})
+                    if isinstance(exits_raw.get("order_book_tightening"), dict)
+                    else {},
+                ),
+            }
+        ),
+    )
+    values["timeframes"] = ShortEvTimeframesSection(
+        **{
+            **default.timeframes.__dict__,
+            **_dataclass_payload(
+                ShortEvTimeframesSection,
+                raw.get("timeframes", {}) if isinstance(raw.get("timeframes"), dict) else {},
+            ),
+        }
+    )
+    values["damage_guard"] = ShortEvDamageGuardSection(
+        **{
+            **default.damage_guard.__dict__,
+            **_dataclass_payload(
+                ShortEvDamageGuardSection,
+                raw.get("damage_guard", {}) if isinstance(raw.get("damage_guard"), dict) else {},
+            ),
+        }
+    )
+    if execution_mode != TradeMode.LOCAL_PAPER:
+        values["enabled"] = False
+    if not bool(values.get("live_enabled", False)):
+        values["live_enabled"] = False
+    return ShortEvEngineSection(**values)
+
+
 def load_config(config_path: str | Path) -> AppConfig:
     config_path = Path(config_path).resolve()
     root_dir = config_path.parent.parent
@@ -1618,6 +1807,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         paper_alpha_values["enabled"] = False
     paper_alpha_capture = PaperAlphaCaptureSection(**paper_alpha_values)
     short_only = _parse_short_only(raw.get("short_only", {}), execution_mode=execution.mode)
+    short_ev_engine = _parse_short_ev_engine(raw.get("short_ev_engine", {}), execution_mode=execution.mode)
     golden_baseline = _parse_golden_baseline(raw.get("golden_baseline", {}))
     if short_only.enabled:
         side_policy = SidePolicySection(
@@ -1655,6 +1845,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         market_selloff_impulse=market_selloff_impulse,
         paper_alpha_capture=paper_alpha_capture,
         short_only=short_only,
+        short_ev_engine=short_ev_engine,
         golden_baseline=golden_baseline,
         execution=execution,
         backtest=backtest,

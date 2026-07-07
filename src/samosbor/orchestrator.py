@@ -70,6 +70,16 @@ from .autonomy.signal_feedback import (
     save_signal_feedback,
     signal_feedback_path,
 )
+from .autonomy.short_ev_engine import (
+    build_setup_stats,
+    classify_short_setup,
+    estimate_round_trip_costs,
+    estimate_short_setup_ev,
+    find_registry_setup_for_raw_signal,
+    short_mfe_pct,
+    short_net_breakeven_stop,
+    short_trailing_stop,
+)
 from .autonomy.exit_tuning import (
     build_exit_reason_breakdown,
     build_exit_tuning_payload,
@@ -216,6 +226,14 @@ class TradingOrchestrator:
         return (
             bool(getattr(getattr(self.config, "short_only", None), "enabled", False))
             and self.config.execution.mode.value == "local-paper"
+        )
+
+    def _short_ev_engine_enabled(self) -> bool:
+        return (
+            self._short_only_enabled()
+            and bool(getattr(getattr(self.config, "short_ev_engine", None), "enabled", False))
+            and self.config.execution.mode.value == "local-paper"
+            and not bool(self.config.execution.allow_live_trading)
         )
 
     def _run_short_only_cycle(self) -> dict[str, object]:
@@ -437,6 +455,8 @@ class TradingOrchestrator:
                 broker,
                 position,
                 candles,
+                (confirmation_history or {}).get(symbol, []),
+                provider=provider,
                 timestamp=latest.timestamp,
             )
             events.extend(guard_events)
@@ -729,6 +749,16 @@ class TradingOrchestrator:
                 )
                 if signal is not None:
                     raw_real_trade_source = "early_5m_starter"
+            elif self._short_ev_engine_enabled():
+                signal = self._short_ev_engine_raw_signal(
+                    instrument,
+                    candles,
+                    confirmation_history.get(instrument.symbol, []),
+                    market_regime=market_regime,
+                    source_strategy_direction=source_strategy_direction,
+                )
+                if signal is not None:
+                    raw_real_trade_source = "setup_registry"
             elif bool(self.config.short_only.allow_synthetic_short_candidates) and bool(
                 self.config.short_only.synthetic.enabled
             ):
@@ -820,7 +850,7 @@ class TradingOrchestrator:
                 timestamp=latest.timestamp,
                 quantity_lots=assessment_quantity,
             )
-            edge = self._short_only_edge_gate(
+            legacy_edge = self._short_only_edge_gate(
                 signal_for_entry,
                 market_regime=market_regime,
                 quantity_lots=assessment_quantity,
@@ -847,6 +877,63 @@ class TradingOrchestrator:
                 real_trade_source=raw_real_trade_source,
                 execution_guard=execution_guard,
             )
+            short_ev_setup = {}
+            short_ev_costs = {}
+            short_ev_result = {}
+            ev_decision = ""
+            ev_size_multiplier = 1.0
+            if self._short_ev_engine_enabled():
+                setup_verdict = classify_short_setup(
+                    signal_for_entry,
+                    candles,
+                    confirmation_history.get(instrument.symbol, []),
+                    market_regime=market_regime,
+                    config=self.config,
+                    real_trade_source=raw_real_trade_source,
+                    golden_3tf=golden_3tf,
+                    execution_guard=execution_guard,
+                )
+                costs = estimate_round_trip_costs(signal_for_entry, assessment_quantity, self.config)
+                ml_payload = signal_for_entry.metadata.get("ml_learning", {})
+                ml_expected = (
+                    self._object_float(ml_payload.get("expected_pnl_position_rub"))
+                    if isinstance(ml_payload, dict) and bool(ml_payload.get("available", False))
+                    else None
+                )
+                ev = estimate_short_setup_ev(
+                    signal_for_entry,
+                    setup_verdict=setup_verdict,
+                    setup_stats=build_setup_stats(broker.trades, setup_verdict.setup_id),
+                    costs=costs,
+                    quantity_lots=assessment_quantity,
+                    config=self.config,
+                    ml_expected_net_edge_rub=ml_expected,
+                )
+                short_ev_setup = setup_verdict.to_dict()
+                short_ev_costs = costs.to_dict()
+                short_ev_result = ev.to_dict()
+                ev_decision = str(short_ev_result.get("decision", ""))
+                if ev_decision == "probe_allowed":
+                    ev_size_multiplier = min(
+                        float(setup_verdict.default_size_multiplier),
+                        float(self.config.short_ev_engine.probe.max_size_multiplier),
+                    )
+                else:
+                    ev_size_multiplier = float(setup_verdict.default_size_multiplier or 1.0)
+                edge = {
+                    "passed": ev_decision in {"real_allowed", "probe_allowed"},
+                    "expected_net_edge_rub": float(short_ev_result.get("ev_net_rub", 0.0) or 0.0),
+                    "required_net_edge_rub": float(self.config.short_ev_engine.ev_gate.min_ev_net_rub),
+                    "source": str(short_ev_result.get("source", "setup_ev")),
+                    "multiplier": _bounded_multiplier(ev_size_multiplier),
+                    "edge_bucket": self._short_only_edge_bucket(
+                        float(short_ev_result.get("ev_net_rub", 0.0) or 0.0)
+                        - float(self.config.short_ev_engine.ev_gate.min_ev_net_rub)
+                    ),
+                    "reason": str(short_ev_result.get("reason", "")),
+                }
+            else:
+                edge = legacy_edge
             hard_reasons = []
             if risk_hard_reason:
                 hard_reasons.append(risk_hard_reason)
@@ -856,7 +943,7 @@ class TradingOrchestrator:
                 hard_reasons.append(str(micro["hard_reason"]))
             if confirmation["hard_reason"]:
                 hard_reasons.append(str(confirmation["hard_reason"]))
-            if golden_3tf and not bool(golden_3tf.get("passed", False)):
+            if golden_3tf and not bool(golden_3tf.get("passed", False)) and not self._short_ev_engine_enabled():
                 reasons = golden_3tf.get("failed_conditions", [])
                 reason_text = ", ".join(str(reason) for reason in reasons) or "golden baseline rejected"
                 hard_reasons.append(f"golden_baseline_shadow_only: {reason_text}")
@@ -869,6 +956,15 @@ class TradingOrchestrator:
             metadata["market_regime"] = market_regime.as_event()
             if golden_3tf:
                 metadata["golden_3tf"] = golden_3tf
+            if short_ev_result:
+                metadata["short_ev_engine"] = {
+                    "enabled": True,
+                    "setup": short_ev_setup,
+                    "costs": short_ev_costs,
+                    "ev": short_ev_result,
+                    "setup_id": short_ev_setup.get("setup_id", ""),
+                    "decision": ev_decision,
+                }
             short_only_metadata = dict(metadata.get("short_only", {}))
             short_only_metadata.update({
                 "enabled": True,
@@ -894,6 +990,24 @@ class TradingOrchestrator:
                 "source_strategy_signal": source_strategy_direction,
                 "real_trade_source": raw_real_trade_source,
             })
+            if short_ev_result:
+                short_only_metadata.update(
+                    {
+                        "short_ev_engine_enabled": True,
+                        "setup_id": short_ev_setup.get("setup_id", ""),
+                        "setup_passed": bool(short_ev_setup.get("passed", False)),
+                        "setup_reason": str(short_ev_setup.get("reason", "")),
+                        "short_ev_decision": ev_decision,
+                        "short_ev_reason": str(short_ev_result.get("reason", "")),
+                        "short_ev_source": str(short_ev_result.get("source", "")),
+                        "ev_net_rub": float(short_ev_result.get("ev_net_rub", 0.0) or 0.0),
+                        "ev_per_risk": float(short_ev_result.get("ev_per_risk", 0.0) or 0.0),
+                        "ev_confidence": float(short_ev_result.get("confidence", 0.0) or 0.0),
+                        "ev_sample_count": int(short_ev_result.get("sample_count", 0) or 0),
+                        "costs": short_ev_costs,
+                        "ml_expected_net_edge_rub": short_ev_result.get("ml_expected_net_edge_rub"),
+                    }
+                )
             if golden_3tf:
                 short_only_metadata.update(
                     {
@@ -1616,7 +1730,21 @@ class TradingOrchestrator:
         short_only = signal.metadata.get("short_only", {})
         if not isinstance(short_only, dict):
             short_only = {}
-        if bool(self.config.golden_baseline.enabled):
+        if self._short_ev_engine_enabled():
+            if signal.direction != SignalDirection.SHORT:
+                return "short_ev_engine forbids long real trades"
+            if market_regime.regime == "range_chop":
+                return "short_ev_engine forbids range_chop real trades"
+            setup_id = str(short_only.get("setup_id", ""))
+            if setup_id not in set(self.config.short_ev_engine.allowed_setups):
+                return "unknown_setup_not_allowed_real"
+            if str(short_only.get("short_ev_decision", "")) not in {"real_allowed", "probe_allowed"}:
+                return str(short_only.get("short_ev_reason", "short_ev_engine EV gate did not allow real entry"))
+            if bool(short_only.get("synthetic_candidate", False)):
+                return "short_ev_engine synthetic source shadow_only"
+            if is_upsize:
+                return "short_ev_engine upsize real trading disabled"
+        if bool(self.config.golden_baseline.enabled) and not self._short_ev_engine_enabled():
             source = str(short_only.get("real_trade_source", ""))
             allowed_sources = self.config.short_only.real_trade_sources
             if source == "strategy_short" and not bool(allowed_sources.strategy_short):
@@ -1646,10 +1774,15 @@ class TradingOrchestrator:
         if bool(short_only.get("synthetic_candidate", False)):
             if not bool(self.config.short_only.synthetic.real_trading_enabled):
                 return "short_only synthetic real trading disabled"
-        if source_strategy_direction != "short" and str(short_only.get("real_trade_source", "")) != "early_5m_starter":
+        if (
+            not self._short_ev_engine_enabled()
+            and source_strategy_direction != "short"
+            and str(short_only.get("real_trade_source", "")) != "early_5m_starter"
+        ):
             return "short_only real trade requires strategy_short"
         if (
-            bool(self.config.short_only.ml.positive_edge_is_required_but_not_sufficient)
+            not self._short_ev_engine_enabled()
+            and bool(self.config.short_only.ml.positive_edge_is_required_but_not_sufficient)
             and str(short_only.get("edge_source", "")) != "ml"
         ):
             return "short_only real trade requires positive ML edge"
@@ -1666,6 +1799,8 @@ class TradingOrchestrator:
         confirmation_status: str,
     ) -> bool:
         if bool(short_only.get("golden_3tf_shadow_only", False)):
+            return True
+        if str(short_only.get("short_ev_decision", "")) in {"shadow_only", "blocked_negative_ev"}:
             return True
         if bool(short_only.get("synthetic_candidate", False)):
             return bool(self.config.short_only.synthetic.shadow_only)
@@ -1818,6 +1953,51 @@ class TradingOrchestrator:
         if not bool(self.config.short_only.damage_guard.enabled):
             failures.append("short_only damage guard must stay enabled")
         events: list[dict[str, object]] = []
+        if bool(getattr(self.config.short_ev_engine, "enabled", False)):
+            ev_cfg = self.config.short_ev_engine
+            ev_timeframes = ev_cfg.timeframes
+            ev_forbidden = {str(value).strip().lower() for value in ev_timeframes.forbidden}
+            ev_active_timeframes = {
+                str(ev_timeframes.primary).strip().lower(),
+                str(ev_timeframes.trigger).strip().lower(),
+                str(ev_timeframes.execution_guard).strip().lower(),
+            }
+            runtime_timeframes = {
+                str(self.config.data.timeframe).strip().lower(),
+                str(self.config.strategy.entry_confirmation_timeframe).strip().lower(),
+                str(ev_timeframes.execution_guard).strip().lower(),
+            }
+            if bool(ev_cfg.long_enabled):
+                failures.append("short_ev_engine long_enabled must stay false")
+            if bool(ev_cfg.range_chop_enabled):
+                failures.append("short_ev_engine range_chop_enabled must stay false")
+            if bool(ev_cfg.live_enabled):
+                failures.append("short_ev_engine live_enabled must stay false")
+            if str(ev_cfg.mode) != "short_only_ev":
+                failures.append("short_ev_engine mode must be short_only_ev")
+            if ev_active_timeframes != {"15min", "5min", "1min"}:
+                failures.append("short_ev_engine active timeframes must be 15min/5min/1min")
+            if ev_forbidden.intersection(runtime_timeframes):
+                failures.append("short_ev_engine active timeframe includes forbidden timeframe")
+            events.append(
+                {
+                    "timestamp": timestamp.isoformat(),
+                    "action": "short_ev_engine_config",
+                    "enabled": True,
+                    "mode": ev_cfg.mode,
+                    "allowed_setups": list(ev_cfg.allowed_setups),
+                    "unknown_setup_action": ev_cfg.unknown_setup_action,
+                    "long_enabled": ev_cfg.long_enabled,
+                    "range_chop_enabled": ev_cfg.range_chop_enabled,
+                    "live_enabled": ev_cfg.live_enabled,
+                    "primary_timeframe": ev_timeframes.primary,
+                    "trigger_timeframe": ev_timeframes.trigger,
+                    "execution_guard_timeframe": ev_timeframes.execution_guard,
+                    "forbidden_timeframes": list(ev_timeframes.forbidden),
+                    "allow_live_trading": self.config.execution.allow_live_trading,
+                    "execution_mode": self.config.execution.mode.value,
+                }
+            )
         if bool(self.config.golden_baseline.enabled):
             timeframes = self.config.golden_baseline.timeframes_config
             forbidden = {str(value).strip().lower() for value in self.config.golden_baseline.forbidden_timeframes}
@@ -1858,6 +2038,70 @@ class TradingOrchestrator:
             }
         )
         return events
+
+    def _short_ev_engine_raw_signal(
+        self,
+        instrument,
+        candles_15m: list,
+        candles_5m: list,
+        *,
+        market_regime,
+        source_strategy_direction: str,
+    ) -> Signal | None:
+        if not self._short_ev_engine_enabled() or not candles_15m:
+            return None
+        if source_strategy_direction == "long":
+            return None
+        verdict = find_registry_setup_for_raw_signal(
+            candles_15m,
+            candles_5m,
+            market_regime=market_regime,
+            config=self.config,
+        )
+        if not verdict.passed:
+            return None
+        latest = candles_15m[-1]
+        entry = float(latest.close)
+        if entry <= 0:
+            return None
+        atr_value = atr(candles_15m, self.config.strategy.atr_window)
+        recent = candles_5m[-6:] if candles_5m else candles_15m[-4:]
+        local_rebound_high = max((float(candle.high) for candle in recent), default=entry)
+        tick = float(getattr(instrument, "tick_size", 0.01) or 0.01)
+        fallback_risk = max(entry * 0.0035, tick)
+        risk_per_unit = max(
+            local_rebound_high - entry,
+            (atr_value or fallback_risk) * float(self.config.strategy.atr_stop_multiple),
+            fallback_risk,
+        )
+        stop = entry + risk_per_unit
+        take = max(tick, entry - risk_per_unit * float(self.config.strategy.reward_to_risk))
+        strength = _bounded_multiplier(0.45 + min(0.35, risk_per_unit / entry * 20.0))
+        return Signal(
+            instrument=instrument,
+            direction=SignalDirection.SHORT,
+            strength=strength,
+            entry_price=entry,
+            stop_price=stop,
+            take_profit=take,
+            reason=f"short_ev_engine {verdict.setup_id}",
+            context_score=-strength,
+            metadata={
+                "short_ev_engine": {
+                    "enabled": True,
+                    "setup_id": verdict.setup_id,
+                    "setup": verdict.to_dict(),
+                },
+                "short_only": {
+                    "enabled": True,
+                    "synthetic_candidate": False,
+                    "setup_registry_candidate": True,
+                    "setup_id": verdict.setup_id,
+                    "source_strategy_signal": source_strategy_direction,
+                    "real_trade_source": "setup_registry",
+                },
+            },
+        )
 
     def _golden_early_5m_raw_signal(
         self,
@@ -2038,12 +2282,27 @@ class TradingOrchestrator:
         broker,
         position,
         candles: list,
+        candles_5m: list | None = None,
         *,
+        provider=None,
         timestamp: datetime,
     ) -> list[dict[str, object]]:
         if position.direction != SignalDirection.SHORT or not candles:
             return []
         events: list[dict[str, object]] = []
+        if self._short_ev_engine_enabled():
+            events.extend(
+                self._short_ev_engine_position_events(
+                    broker,
+                    position,
+                    candles_5m or [],
+                    provider=provider,
+                    timestamp=timestamp,
+                )
+            )
+            position = broker.portfolio.positions.get(position.instrument.symbol)
+            if position is None:
+                return events
         cfg = self.config.short_only.exits
         mfe_r = self._short_only_position_mfe_r(position, candles)
         if bool(cfg.breakeven_after_mfe_r) and mfe_r >= float(cfg.breakeven_after_mfe_r):
@@ -2091,6 +2350,126 @@ class TradingOrchestrator:
                     }
                 )
         return events
+
+    def _short_ev_engine_position_events(
+        self,
+        broker,
+        position,
+        candles_5m: list,
+        *,
+        provider=None,
+        timestamp: datetime,
+    ) -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        cfg = self.config.short_ev_engine.exits
+        position.record_price_extremes(price=position.current_price)
+        mfe_pct = short_mfe_pct(position)
+        metadata = getattr(position, "entry_metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        engine = metadata.get("short_ev_engine", {})
+        if not isinstance(engine, dict):
+            engine = {}
+        ev_payload = engine.get("ev", {})
+        costs = {
+            **(engine.get("costs", {}) if isinstance(engine.get("costs", {}), dict) else {}),
+            **(ev_payload if isinstance(ev_payload, dict) else {}),
+        }
+        if bool(cfg.breakeven.enabled) and mfe_pct >= float(cfg.breakeven.activation_mfe_pct):
+            stop = short_net_breakeven_stop(position, costs, buffer_bps=float(cfg.breakeven.buffer_bps))
+            if stop < position.stop_price:
+                if broker.update_position_protection(
+                    position.instrument.symbol,
+                    timestamp=timestamp,
+                    stop_price=stop,
+                    reason="short-net-breakeven-0.3-0.4pct",
+                ):
+                    position.entry_metadata = {
+                        **metadata,
+                        "short_ev_engine": {
+                            **engine,
+                            "breakeven_armed": True,
+                            "breakeven_armed_at": timestamp.isoformat(),
+                            "breakeven_stop_price": stop,
+                        },
+                    }
+                    events.append(
+                        {
+                            "timestamp": timestamp.isoformat(),
+                            "symbol": position.instrument.symbol,
+                            "action": "short_net_breakeven_armed",
+                            "mfe_pct": round(mfe_pct, 6),
+                            "stop_price": stop,
+                            "metadata": {"short_ev_engine": position.entry_metadata["short_ev_engine"]},
+                        }
+                    )
+        position = broker.portfolio.positions.get(position.instrument.symbol)
+        if position is None:
+            return events
+        if bool(cfg.trailing.enabled) and mfe_pct >= float(cfg.trailing.activation_mfe_pct):
+            order_book = self._short_ev_engine_order_book_for_position(provider, position)
+            tighten = 1.0
+            if order_book and bool(cfg.trailing.use_order_book_tightening):
+                spread = self._object_float(order_book.get("spread_bps")) or 0.0
+                imbalance = self._object_float(order_book.get("side_imbalance", order_book.get("imbalance"))) or 0.0
+                if (
+                    spread >= float(cfg.order_book_tightening.spread_widen_bps)
+                    or imbalance <= float(cfg.order_book_tightening.adverse_imbalance_threshold)
+                ):
+                    tighten = float(cfg.order_book_tightening.tighten_multiplier)
+            new_stop, reason = short_trailing_stop(
+                position,
+                candles_5m,
+                atr_window=int(cfg.trailing.atr_window),
+                atr_multiple=float(cfg.trailing.atr_multiple),
+                order_book=order_book,
+                tighten_multiplier=tighten,
+            )
+            if new_stop is not None and broker.update_position_protection(
+                position.instrument.symbol,
+                timestamp=timestamp,
+                stop_price=new_stop,
+                reason=reason,
+            ):
+                events.append(
+                    {
+                        "timestamp": timestamp.isoformat(),
+                        "symbol": position.instrument.symbol,
+                        "action": "short_ev_trailing_stop_updated",
+                        "mfe_pct": round(mfe_pct, 6),
+                        "stop_price": new_stop,
+                        "order_book_tightened": tighten < 1.0,
+                        "metadata": {"short_ev_engine": engine},
+                    }
+                )
+                if tighten < 1.0:
+                    events.append(
+                        {
+                            "timestamp": timestamp.isoformat(),
+                            "symbol": position.instrument.symbol,
+                            "action": "short_ev_order_book_tightening",
+                            "mfe_pct": round(mfe_pct, 6),
+                            "spread_bps": (order_book or {}).get("spread_bps"),
+                            "side_imbalance": (order_book or {}).get("side_imbalance"),
+                            "metadata": {"short_ev_engine": engine},
+                        }
+                    )
+        return events
+
+    def _short_ev_engine_order_book_for_position(self, provider, position) -> dict[str, object]:
+        if provider is None or not hasattr(provider, "get_order_book_snapshot"):
+            return {}
+        try:
+            snapshot = provider.get_order_book_snapshot(
+                position.instrument,
+                depth=int(self.config.strategy.order_book_depth),
+                quantity_lots=max(1, int(position.quantity_lots)),
+                direction="short",
+            )
+        except Exception as exc:  # pragma: no cover - defensive around broker/data provider IO
+            LOGGER.warning("short EV order book tightening snapshot failed for %s: %s", position.instrument.symbol, exc)
+            return {}
+        return dict(snapshot) if isinstance(snapshot, dict) else {}
 
     @staticmethod
     def _short_only_position_mfe_r(position, candles: list) -> float:

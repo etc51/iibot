@@ -308,6 +308,123 @@ def test_trade_review_short_only_section_and_legacy_long_learning_marker():
     assert payload["long_learning_review"]["legacy_only"] is True
 
 
+def test_short_ev_review_reports_setup_ev_exits_costs_and_shadow_validation():
+    opened = datetime(2026, 7, 7, 10, 0, tzinfo=timezone.utc)
+    metadata = {
+        "short_ev_engine": {
+            "enabled": True,
+            "setup_id": "normal_15m_trend_short",
+            "ev": {"ev_net_rub": 64.0, "confidence": 0.61},
+            "costs": {"total_cost_rub": 12.0},
+        },
+        "short_only": {
+            "enabled": True,
+            "setup_id": "normal_15m_trend_short",
+            "short_ev_engine_enabled": True,
+            "short_ev_decision": "real_allowed",
+            "ev_net_rub": 64.0,
+            "ev_per_risk": 0.20,
+            "ev_confidence": 0.61,
+            "costs": {
+                "entry_commission_rub": 4.0,
+                "exit_commission_rub": 4.0,
+                "spread_cost_rub": 2.0,
+                "slippage_cost_rub": 2.0,
+                "total_cost_rub": 12.0,
+            },
+        },
+        "trade_excursion": {
+            "available": True,
+            "mfe_price": 99.0,
+            "mae_price": 100.5,
+            "mfe_pnl_rub": 10.0,
+            "mae_pnl_rub": -5.0,
+        },
+    }
+    events = [
+        {
+            "timestamp": opened.isoformat(),
+            "action": "short_ev_engine_config",
+            "enabled": True,
+            "mode": "short_only_ev",
+            "allowed_setups": ["normal_15m_trend_short", "golden_15m_breakout_short"],
+            "allow_live_trading": False,
+            "execution_mode": "local-paper",
+        },
+        {
+            "timestamp": opened.isoformat(),
+            "action": "short_only_short_candidate",
+            "symbol": "SBER",
+            "metadata": {"short_only": metadata["short_only"]},
+        },
+        {
+            "timestamp": opened.isoformat(),
+            "action": "signal",
+            "symbol": "SBER",
+            "direction": "short",
+            "approved": True,
+            "metadata": {"short_only": metadata["short_only"]},
+        },
+        {
+            "timestamp": opened.isoformat(),
+            "action": "short_net_breakeven_armed",
+            "symbol": "SBER",
+        },
+        {
+            "timestamp": opened.isoformat(),
+            "action": "short_ev_trailing_stop_updated",
+            "symbol": "SBER",
+        },
+        {
+            "timestamp": opened.isoformat(),
+            "action": "short_ev_order_book_tightening",
+            "symbol": "SBER",
+        },
+        {
+            "timestamp": opened.isoformat(),
+            "action": "short_only_shadow_only",
+            "symbol": "GAZP",
+            "metadata": {
+                "short_only": {
+                    "enabled": True,
+                    "short_ev_engine_enabled": True,
+                    "setup_id": "golden_15m_breakout_short",
+                    "short_ev_decision": "shadow_only",
+                }
+            },
+        },
+    ]
+
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=80.0),
+        [
+            _trade(
+                symbol="SBER",
+                entry_time=opened,
+                net_pnl=80.0,
+                signal_strength=0.7,
+                direction=SignalDirection.SHORT,
+                entry_metadata=metadata,
+            )
+        ],
+        events,
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    review = payload["short_ev_review"]
+    assert review["enabled"] is True
+    assert review["setup_registry"][0]["setup_id"] == "normal_15m_trend_short"
+    assert review["ev_by_setup"][0]["ev_net"] == 64.0
+    assert review["ev_by_setup"][0]["costs_avg"] == 12.0
+    assert review["exit_performance"]["breakeven_armed_count"] == 1
+    assert review["exit_performance"]["trailing_activated_count"] == 1
+    assert review["exit_performance"]["order_book_tightening_count"] == 1
+    assert review["costs"]["commission_total"] == 8.0
+    assert review["shadow_validation"]["shadow_by_setup"]["golden_15m_breakout_short"] == 1
+
+
 def test_trade_review_breaks_down_regime_policy_and_pending_rebound():
     opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
     trades = [
