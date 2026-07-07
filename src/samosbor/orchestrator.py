@@ -13,6 +13,11 @@ from .autonomy.entry_schedule import (
     build_entry_schedule_tuning_payload,
     write_entry_schedule_tuning,
 )
+from .autonomy.golden_baseline import (
+    is_early_5m_starter_short_signal,
+    is_golden_15m_short_breakout_signal,
+    passes_1m_execution_guard,
+)
 from .autonomy.runner import runner_breakeven_stop, runner_extreme_price
 from .autonomy.entry_confirmation import build_entry_confirmation_context
 from .autonomy.entry_quality_tuning import (
@@ -223,6 +228,7 @@ class TradingOrchestrator:
         instruments = provider.resolve_universe(self.config.data.instruments)
         history = provider.load_history(instruments)
         confirmation_history = self._load_entry_confirmation_history(provider, instruments, history)
+        execution_guard_history = self._load_golden_execution_guard_history(provider, instruments, history)
         marks = {symbol: candles[-1].close for symbol, candles in history.items() if candles}
 
         state_path = self.config.resolve_path(self.config.execution.state_path)
@@ -276,7 +282,10 @@ class TradingOrchestrator:
                 broker,
                 risk_manager,
                 strategy,
+                provider,
                 history,
+                confirmation_history,
+                execution_guard_history,
                 marks,
                 timestamp=timestamp,
             )
@@ -308,6 +317,7 @@ class TradingOrchestrator:
                 instruments,
                 history,
                 confirmation_history,
+                execution_guard_history,
                 marks,
                 market_regime=effective_market_regime,
                 timestamp=timestamp,
@@ -372,7 +382,10 @@ class TradingOrchestrator:
         broker,
         risk_manager: RiskManager,
         strategy,
+        provider,
         history: dict[str, list],
+        confirmation_history: dict[str, list] | None,
+        execution_guard_history: dict[str, list] | None,
         marks: dict[str, float],
         *,
         timestamp: datetime,
@@ -404,6 +417,22 @@ class TradingOrchestrator:
             if latest is None:
                 continue
             position.record_price_extremes(low_price=latest.low, high_price=latest.high)
+            if self._position_is_early_5m_starter(position):
+                early_events = self._golden_manage_early_5m_position(
+                    broker,
+                    position,
+                    strategy,
+                    provider,
+                    candles,
+                    (confirmation_history or {}).get(symbol, []),
+                    (execution_guard_history or {}).get(symbol, []),
+                    latest,
+                    mark,
+                )
+                events.extend(early_events)
+                position = broker.portfolio.positions.get(symbol)
+                if position is None:
+                    continue
             guard_events = self._short_only_exit_guard_events(
                 broker,
                 position,
@@ -471,6 +500,180 @@ class TradingOrchestrator:
                     )
         return events
 
+    @staticmethod
+    def _position_is_early_5m_starter(position) -> bool:
+        metadata = getattr(position, "entry_metadata", {})
+        if not isinstance(metadata, dict):
+            return False
+        short_only = metadata.get("short_only", {})
+        if not isinstance(short_only, dict):
+            return False
+        return str(short_only.get("entry_mode", "")) == "early_5m_starter_short" and not bool(
+            short_only.get("promoted_to_golden_15m", False)
+        )
+
+    def _golden_manage_early_5m_position(
+        self,
+        broker,
+        position,
+        strategy,
+        provider,
+        candles_15m: list,
+        candles_5m: list,
+        candles_1m: list,
+        latest,
+        mark: float,
+    ) -> list[dict[str, object]]:
+        cfg = self.config.golden_baseline.early_5m
+        events: list[dict[str, object]] = []
+        opened_minutes = max(0.0, (latest.timestamp - position.opened_at).total_seconds() / 60.0)
+        symbol = position.instrument.symbol
+        if bool(cfg.promotion.enabled):
+            strategy_signal = strategy.generate_signal(position.instrument, candles_15m)
+            if strategy_signal is not None and strategy_signal.direction == SignalDirection.SHORT:
+                signal_for_entry = self._signal_with_entry_candle_context(strategy_signal, candles_15m)
+                signal_for_entry = self._signal_with_entry_confirmation_context(
+                    signal_for_entry,
+                    candles_5m,
+                    signal_timestamp=latest.timestamp,
+                )
+                signal_for_entry = self._signal_with_entry_microstructure(
+                    provider,
+                    signal_for_entry,
+                    quantity_lots=max(1, int(position.quantity_lots)),
+                )
+                micro = dict(signal_for_entry.metadata.get("microstructure", {}))
+                guard = passes_1m_execution_guard(candles_1m, candles_5m, micro, self.config)
+                verdict = is_golden_15m_short_breakout_signal(
+                    signal_for_entry,
+                    candles_15m,
+                    dict(signal_for_entry.metadata.get("entry_confirmation", {})),
+                    micro,
+                    position.entry_metadata.get("market_regime", {}),
+                    self.config,
+                    execution_guard_1m=guard,
+                    source_strategy_direction="short",
+                )
+                if bool(verdict.get("passed", False)):
+                    metadata = dict(position.entry_metadata)
+                    short_only = dict(metadata.get("short_only", {}))
+                    short_only.update(
+                        {
+                            "promoted_to_golden_15m": True,
+                            "promoted_at": latest.timestamp.isoformat(),
+                            "entry_mode": cfg.promotion.promoted_entry_mode,
+                        }
+                    )
+                    metadata["short_only"] = short_only
+                    metadata["golden_3tf_promotion"] = verdict
+                    position.entry_metadata = metadata
+                    events.append(
+                        {
+                            "timestamp": latest.timestamp.isoformat(),
+                            "symbol": symbol,
+                            "action": "early_5m_promoted_to_golden_15m",
+                            "direction": "short",
+                            "quantity_lots": int(position.quantity_lots),
+                            "metadata": {"golden_3tf": verdict, "short_only": short_only},
+                        }
+                    )
+                    return events
+
+        failure_cfg = cfg.failure_exit
+        if bool(failure_cfg.enabled) and opened_minutes >= float(failure_cfg.check_after_minutes):
+            pnl = position.unrealized_pnl(mark)
+            no_continuation = mark >= position.entry_price
+            if bool(failure_cfg.close_if_pnl_negative_and_no_continuation) and pnl < 0 and no_continuation:
+                broker.close_position(
+                    symbol,
+                    price=mark,
+                    timestamp=latest.timestamp,
+                    reason=ExitReason.EARLY_5M_FAILED_FAST,
+                )
+                events.append(
+                    {
+                        "timestamp": latest.timestamp.isoformat(),
+                        "symbol": symbol,
+                        "action": "early_5m_failed_fast_exit",
+                        "reason": failure_cfg.reason,
+                        "unrealized_pnl_rub": round(pnl, 2),
+                    }
+                )
+                return events
+
+        deadline_minutes = max(1, int(cfg.promotion.deadline_15m_bars)) * 15.0
+        if bool(cfg.promotion.close_if_not_promoted) and opened_minutes >= deadline_minutes:
+            broker.close_position(
+                symbol,
+                price=mark,
+                timestamp=latest.timestamp,
+                reason=ExitReason.EARLY_5M_NOT_PROMOTED,
+            )
+            events.append(
+                {
+                    "timestamp": latest.timestamp.isoformat(),
+                    "symbol": symbol,
+                    "action": "early_5m_not_promoted_exit",
+                    "reason": "early_5m_not_promoted",
+                    "opened_minutes": round(opened_minutes, 2),
+                }
+            )
+        return events
+
+    def _golden_3tf_verdict_for_signal(
+        self,
+        signal,
+        candles_15m: list,
+        candles_5m: list,
+        *,
+        market_regime,
+        source_strategy_direction: str,
+        real_trade_source: str,
+        execution_guard: dict[str, object],
+    ) -> dict[str, object]:
+        if not bool(self.config.golden_baseline.enabled):
+            return {}
+        metadata = dict(signal.metadata)
+        confirmation = dict(metadata.get("entry_confirmation", {}))
+        micro = dict(metadata.get("microstructure", {}))
+        if real_trade_source == "strategy_short":
+            return is_golden_15m_short_breakout_signal(
+                signal,
+                candles_15m,
+                confirmation,
+                micro,
+                market_regime,
+                self.config,
+                execution_guard_1m=execution_guard,
+                source_strategy_direction=source_strategy_direction,
+            )
+        if real_trade_source == "early_5m_starter":
+            return is_early_5m_starter_short_signal(
+                candles_15m,
+                candles_5m,
+                micro,
+                execution_guard,
+                market_regime,
+                self.config,
+                source_strategy_direction=source_strategy_direction,
+            )
+        return {
+            "enabled": True,
+            "passed": False,
+            "verdict": "shadow_only",
+            "entry_mode": str(real_trade_source or "non_baseline_source"),
+            "failed_conditions": ["non_baseline_source_shadow_only"],
+            "indicators": {},
+            "timeframes": {
+                "primary": self.config.golden_baseline.timeframes_config.primary,
+                "early_trigger": self.config.golden_baseline.timeframes_config.early_trigger,
+                "execution_guard": self.config.golden_baseline.timeframes_config.execution_guard,
+            },
+            "source_run": self.config.golden_baseline.source_run,
+            "source_commit": self.config.golden_baseline.source_commit,
+            "size_multiplier": 0.0,
+        }
+
     def _short_only_collect_candidates(
         self,
         provider,
@@ -481,6 +684,7 @@ class TradingOrchestrator:
         instruments: list,
         history: dict[str, list],
         confirmation_history: dict[str, list],
+        execution_guard_history: dict[str, list],
         marks: dict[str, float],
         *,
         market_regime,
@@ -511,8 +715,20 @@ class TradingOrchestrator:
                 )
 
             signal = None
+            raw_real_trade_source = "synthetic"
             if strategy_signal is not None and strategy_signal.direction == SignalDirection.SHORT:
                 signal = strategy_signal
+                raw_real_trade_source = "strategy_short"
+            elif bool(self.config.golden_baseline.enabled) and bool(self.config.golden_baseline.early_5m.enabled):
+                signal = self._golden_early_5m_raw_signal(
+                    instrument,
+                    candles,
+                    confirmation_history.get(instrument.symbol, []),
+                    market_regime=market_regime,
+                    source_strategy_direction=source_strategy_direction,
+                )
+                if signal is not None:
+                    raw_real_trade_source = "early_5m_starter"
             elif bool(self.config.short_only.allow_synthetic_short_candidates) and bool(
                 self.config.short_only.synthetic.enabled
             ):
@@ -611,6 +827,26 @@ class TradingOrchestrator:
             )
             micro = self._short_only_microstructure_gate(signal_for_entry)
             confirmation = self._short_only_confirmation_gate(signal_for_entry, market_regime=market_regime)
+            micro_snapshot = dict(signal_for_entry.metadata.get("microstructure", {}))
+            execution_guard = (
+                passes_1m_execution_guard(
+                    execution_guard_history.get(instrument.symbol, []),
+                    confirmation_history.get(instrument.symbol, []),
+                    micro_snapshot,
+                    self.config,
+                )
+                if bool(self.config.golden_baseline.enabled)
+                else {}
+            )
+            golden_3tf = self._golden_3tf_verdict_for_signal(
+                signal_for_entry,
+                candles,
+                confirmation_history.get(instrument.symbol, []),
+                market_regime=market_regime,
+                source_strategy_direction=source_strategy_direction,
+                real_trade_source=raw_real_trade_source,
+                execution_guard=execution_guard,
+            )
             hard_reasons = []
             if risk_hard_reason:
                 hard_reasons.append(risk_hard_reason)
@@ -620,11 +856,19 @@ class TradingOrchestrator:
                 hard_reasons.append(str(micro["hard_reason"]))
             if confirmation["hard_reason"]:
                 hard_reasons.append(str(confirmation["hard_reason"]))
+            if golden_3tf and not bool(golden_3tf.get("passed", False)):
+                reasons = golden_3tf.get("failed_conditions", [])
+                reason_text = ", ".join(str(reason) for reason in reasons) or "golden baseline rejected"
+                hard_reasons.append(f"golden_baseline_shadow_only: {reason_text}")
             metadata = dict(signal_for_entry.metadata)
             multiplier = _bounded_multiplier(
                 float(edge["multiplier"]) * float(micro["multiplier"]) * float(confirmation["multiplier"])
             )
+            if golden_3tf:
+                multiplier = _bounded_multiplier(multiplier * float(golden_3tf.get("size_multiplier", 1.0) or 1.0))
             metadata["market_regime"] = market_regime.as_event()
+            if golden_3tf:
+                metadata["golden_3tf"] = golden_3tf
             short_only_metadata = dict(metadata.get("short_only", {}))
             short_only_metadata.update({
                 "enabled": True,
@@ -648,8 +892,18 @@ class TradingOrchestrator:
                 "is_upsize": is_upsize,
                 "existing_quantity_lots": int(existing_position.quantity_lots) if is_upsize else 0,
                 "source_strategy_signal": source_strategy_direction,
-                "real_trade_source": "strategy_short" if source_strategy_direction == "short" else "synthetic",
+                "real_trade_source": raw_real_trade_source,
             })
+            if golden_3tf:
+                short_only_metadata.update(
+                    {
+                        "golden_3tf": golden_3tf,
+                        "golden_3tf_passed": bool(golden_3tf.get("passed", False)),
+                        "golden_3tf_verdict": str(golden_3tf.get("verdict", "")),
+                        "golden_3tf_shadow_only": not bool(golden_3tf.get("passed", False)),
+                        "entry_mode": str(golden_3tf.get("entry_mode", "")),
+                    }
+                )
             metadata["short_only"] = short_only_metadata
             signal_for_entry = replace(signal_for_entry, metadata=metadata)
             cycle_events.append(
@@ -776,7 +1030,14 @@ class TradingOrchestrator:
         )
         max_new = int(getattr(sizing, "max_new_shorts_per_cycle", len(candidates)))
         opened = 0
+        early_opened = 0
         blocked: Counter[str] = Counter()
+        early_cfg = self.config.golden_baseline.early_5m
+        early_existing = sum(
+            1
+            for position in broker.portfolio.positions.values()
+            if self._position_is_early_5m_starter(position)
+        )
         damage_guard = self._short_only_damage_guard_state(broker, marks, timestamp)
         if damage_guard["triggered"]:
             events.append(
@@ -789,6 +1050,10 @@ class TradingOrchestrator:
         for candidate in candidates:
             signal = candidate["signal"]
             is_upsize = bool(candidate.get("is_upsize", False))
+            short_only_metadata = signal.metadata.get("short_only", {})
+            if not isinstance(short_only_metadata, dict):
+                short_only_metadata = {}
+            is_early_5m = str(short_only_metadata.get("entry_mode", "")) == "early_5m_starter_short"
             if damage_guard["triggered"]:
                 blocked["damage_guard"] += 1
                 reason = "short_only damage guard triggered"
@@ -829,6 +1094,34 @@ class TradingOrchestrator:
                 )
                 if is_upsize:
                     events.append(self._short_only_upsize_event(signal, candidate, market_regime, "blocked", 0, "short_only max new shorts per cycle reached"))
+                continue
+            if is_early_5m and early_opened >= int(early_cfg.max_new_entries_per_cycle):
+                blocked["early_5m_max_new_entries_per_cycle"] += 1
+                events.append(
+                    self._short_only_signal_event(
+                        signal,
+                        market_regime=market_regime,
+                        timestamp=candidate["timestamp"],
+                        approved=False,
+                        reason="early_5m max new entries per cycle reached",
+                        quantity_lots=0,
+                        original_quantity_lots=int(candidate["risk_quantity_lots"]),
+                    )
+                )
+                continue
+            if is_early_5m and early_existing + early_opened >= int(early_cfg.max_positions):
+                blocked["early_5m_max_positions"] += 1
+                events.append(
+                    self._short_only_signal_event(
+                        signal,
+                        market_regime=market_regime,
+                        timestamp=candidate["timestamp"],
+                        approved=False,
+                        reason="early_5m max positions reached",
+                        quantity_lots=0,
+                        original_quantity_lots=int(candidate["risk_quantity_lots"]),
+                    )
+                )
                 continue
             if not is_upsize and len(broker.portfolio.positions) >= max_positions:
                 blocked["max_positions"] += 1
@@ -948,6 +1241,8 @@ class TradingOrchestrator:
             else:
                 broker.open_position(signal, quantity_lots, candidate["timestamp"])
             opened += 1
+            if is_early_5m:
+                early_opened += 1
 
         final_gross = broker.portfolio.gross_exposure(marks)
         budget_used = final_gross / target_gross if target_gross > 0 else 0.0
@@ -959,6 +1254,8 @@ class TradingOrchestrator:
             "budget_used_pct": round(budget_used, 6),
             "positive_ev_candidates": len(candidates),
             "shorts_opened": opened,
+            "early_5m_opened": early_opened,
+            "early_5m_existing": early_existing,
             "blocked_reasons": dict(sorted(blocked.items())),
         }
         events.append(
@@ -1319,6 +1616,23 @@ class TradingOrchestrator:
         short_only = signal.metadata.get("short_only", {})
         if not isinstance(short_only, dict):
             short_only = {}
+        if bool(self.config.golden_baseline.enabled):
+            source = str(short_only.get("real_trade_source", ""))
+            allowed_sources = self.config.short_only.real_trade_sources
+            if source == "strategy_short" and not bool(allowed_sources.strategy_short):
+                return "golden_baseline strategy_short real trading disabled"
+            if source == "early_5m_starter" and not bool(allowed_sources.early_5m_starter):
+                return "golden_baseline early_5m_starter real trading disabled"
+            if source not in {"strategy_short", "early_5m_starter"}:
+                return "golden_baseline non-baseline source shadow_only"
+            if bool(short_only.get("synthetic_candidate", False)):
+                return "golden_baseline synthetic source shadow_only"
+            if is_upsize:
+                return "golden_baseline upsize real trading disabled"
+            if source == "strategy_short" and source_strategy_direction != "short":
+                return "golden_baseline strategy_short requires 15m strategy short"
+            if not bool(short_only.get("golden_3tf_passed", False)):
+                return "golden_baseline 3tf verdict not passed"
         if is_upsize and not (
             bool(self.config.short_only.allow_existing_short_upsize)
             and bool(self.config.short_only.upsize.enabled)
@@ -1332,7 +1646,7 @@ class TradingOrchestrator:
         if bool(short_only.get("synthetic_candidate", False)):
             if not bool(self.config.short_only.synthetic.real_trading_enabled):
                 return "short_only synthetic real trading disabled"
-        if source_strategy_direction != "short":
+        if source_strategy_direction != "short" and str(short_only.get("real_trade_source", "")) != "early_5m_starter":
             return "short_only real trade requires strategy_short"
         if (
             bool(self.config.short_only.ml.positive_edge_is_required_but_not_sufficient)
@@ -1351,6 +1665,8 @@ class TradingOrchestrator:
         *,
         confirmation_status: str,
     ) -> bool:
+        if bool(short_only.get("golden_3tf_shadow_only", False)):
+            return True
         if bool(short_only.get("synthetic_candidate", False)):
             return bool(self.config.short_only.synthetic.shadow_only)
         if bool(short_only.get("is_upsize", False)):
@@ -1387,7 +1703,9 @@ class TradingOrchestrator:
         metadata = dict(signal.metadata)
         short_only = dict(metadata.get("short_only", {}))
         reason_lower = reason.lower()
-        if is_upsize:
+        if bool(short_only.get("golden_3tf_shadow_only", False)):
+            action = "golden_baseline_shadow_only"
+        elif is_upsize:
             action = "short_only_upsize_shadow_only"
         elif bool(short_only.get("synthetic_candidate", False)):
             action = "short_only_synthetic_shadow_only"
@@ -1499,13 +1817,103 @@ class TradingOrchestrator:
             failures.append("strong rebound must block real short entries")
         if not bool(self.config.short_only.damage_guard.enabled):
             failures.append("short_only damage guard must stay enabled")
-        return [
+        events: list[dict[str, object]] = []
+        if bool(self.config.golden_baseline.enabled):
+            timeframes = self.config.golden_baseline.timeframes_config
+            forbidden = {str(value).strip().lower() for value in self.config.golden_baseline.forbidden_timeframes}
+            active_timeframes = {
+                str(self.config.data.timeframe).strip().lower(),
+                str(self.config.strategy.entry_confirmation_timeframe).strip().lower(),
+                str(timeframes.execution_guard).strip().lower(),
+            }
+            if str(self.config.data.timeframe).strip().lower() != "15min":
+                failures.append("golden baseline primary timeframe must be 15min")
+            if str(self.config.strategy.entry_confirmation_timeframe).strip().lower() != "5min":
+                failures.append("golden baseline confirmation timeframe must be 5min")
+            if str(timeframes.execution_guard).strip().lower() != "1min":
+                failures.append("golden baseline execution guard timeframe must be 1min")
+            if forbidden.intersection(active_timeframes):
+                failures.append("golden baseline active timeframe includes forbidden timeframe")
+            events.append(
+                {
+                    "timestamp": timestamp.isoformat(),
+                    "action": "golden_baseline_config",
+                    "enabled": True,
+                    "name": self.config.golden_baseline.name,
+                    "source_run": self.config.golden_baseline.source_run,
+                    "source_commit": self.config.golden_baseline.source_commit,
+                    "primary_timeframe": timeframes.primary,
+                    "early_trigger_timeframe": timeframes.early_trigger,
+                    "execution_guard_timeframe": timeframes.execution_guard,
+                    "forbidden_timeframes": list(self.config.golden_baseline.forbidden_timeframes),
+                    "allow_live_trading": self.config.execution.allow_live_trading,
+                    "execution_mode": self.config.execution.mode.value,
+                }
+            )
+        events.append(
             {
                 "timestamp": timestamp.isoformat(),
                 "action": "short_only_config_audit_failed" if failures else "short_only_config_audit_passed",
                 "failures": failures,
             }
-        ]
+        )
+        return events
+
+    def _golden_early_5m_raw_signal(
+        self,
+        instrument,
+        candles_15m: list,
+        candles_5m: list,
+        *,
+        market_regime,
+        source_strategy_direction: str,
+    ) -> Signal | None:
+        if not bool(self.config.golden_baseline.enabled) or not bool(self.config.golden_baseline.early_5m.enabled):
+            return None
+        if self._short_only_mode_for_regime(market_regime.regime) == "NO_TRADE":
+            return None
+        if source_strategy_direction == "long" or not candles_15m or not candles_5m:
+            return None
+        latest = candles_5m[-1]
+        entry = float(latest.close)
+        if entry <= 0:
+            return None
+        atr_value = atr(candles_15m, self.config.strategy.atr_window)
+        recent = candles_5m[-max(3, int(self.config.golden_baseline.early_5m.trigger.rolling_low_window_min)) :]
+        local_rebound_high = max((float(candle.high) for candle in recent), default=entry)
+        fallback_range = max(0.0, float(latest.high) - float(latest.low))
+        risk_per_unit = max(
+            local_rebound_high - entry,
+            (atr_value or fallback_range or entry * 0.004) * float(self.config.strategy.atr_stop_multiple),
+            float(getattr(instrument, "tick_size", 0.01) or 0.01),
+            entry * 0.002,
+        )
+        stop = entry + risk_per_unit
+        take = max(
+            float(getattr(instrument, "tick_size", 0.01) or 0.01),
+            entry - risk_per_unit * float(self.config.strategy.reward_to_risk),
+        )
+        ret3 = entry / candles_5m[-4].close - 1.0 if len(candles_5m) >= 4 and candles_5m[-4].close > 0 else 0.0
+        strength = _bounded_multiplier(0.35 + min(0.30, abs(min(0.0, ret3)) * 25.0))
+        return Signal(
+            instrument=instrument,
+            direction=SignalDirection.SHORT,
+            strength=strength,
+            entry_price=entry,
+            stop_price=stop,
+            take_profit=take,
+            reason="golden baseline early 5m starter short",
+            context_score=-strength,
+            metadata={
+                "short_only": {
+                    "enabled": True,
+                    "synthetic_candidate": False,
+                    "early_5m_starter_candidate": True,
+                    "source_strategy_signal": source_strategy_direction,
+                    "real_trade_source": "early_5m_starter",
+                }
+            },
+        )
 
     def _short_only_synthetic_short_signal(
         self,
@@ -2981,13 +3389,41 @@ class TradingOrchestrator:
         timeframe = self.config.strategy.entry_confirmation_timeframe.strip()
         if not timeframe:
             return {}
+        return self._load_history_for_timeframe(
+            provider,
+            instruments,
+            primary_history,
+            timeframe=timeframe,
+            label="entry confirmation",
+        )
+
+    def _load_golden_execution_guard_history(self, provider, instruments, primary_history):
+        if not bool(self.config.golden_baseline.enabled) or not bool(self.config.golden_baseline.execution_1m.enabled):
+            return {}
+        timeframe = self.config.golden_baseline.timeframes_config.execution_guard.strip()
+        if not timeframe:
+            return {}
+        return self._load_history_for_timeframe(
+            provider,
+            instruments,
+            primary_history,
+            timeframe=timeframe,
+            label="golden execution guard",
+        )
+
+    def _load_history_for_timeframe(self, provider, instruments, primary_history, *, timeframe: str, label: str):
+        timeframe = timeframe.strip()
+        forbidden = {str(value).strip().lower() for value in self.config.golden_baseline.forbidden_timeframes}
+        if bool(self.config.golden_baseline.enabled) and timeframe.lower() in forbidden:
+            LOGGER.warning("%s history skipped for forbidden timeframe %s", label, timeframe)
+            return {}
         if timeframe.lower() == self.config.data.timeframe.lower():
             return primary_history
         if hasattr(provider, "load_history_for_timeframe"):
             try:
                 return provider.load_history_for_timeframe(instruments, timeframe)
             except Exception as exc:  # pragma: no cover - live API dependent
-                LOGGER.warning("Entry confirmation history failed for %s: %s", timeframe, exc)
+                LOGGER.warning("%s history failed for %s: %s", label, timeframe, exc)
                 return {}
 
         confirmation_config = replace(
@@ -2998,7 +3434,7 @@ class TradingOrchestrator:
         try:
             return confirmation_provider.load_history(instruments)
         except Exception as exc:  # pragma: no cover - live API dependent
-            LOGGER.warning("Entry confirmation history failed for %s: %s", timeframe, exc)
+            LOGGER.warning("%s history failed for %s: %s", label, timeframe, exc)
             return {}
 
     def _signal_with_entry_candle_context(self, signal, candles):
@@ -4537,6 +4973,7 @@ def _trade_review_view(payload: dict[str, object]) -> dict[str, object]:
         "mistake_breakdown": payload.get("mistake_breakdown", {}),
         "config_patch_candidates": payload.get("config_patch_candidates", {}),
         "short_only_review": payload.get("short_only_review", {}),
+        "golden_3tf_review": payload.get("golden_3tf_review", {}),
         "recommendations": payload.get("recommendations", []),
     }
 
@@ -4588,6 +5025,13 @@ def _summarize_short_only_activity(
         "synthetic_short_candidates": sum(
             1 for event in all_candidate_events if bool(_event_short_only_metadata(event).get("synthetic_candidate", False))
         ),
+        "early_5m_starter_candidates": sum(
+            1 for event in all_candidate_events if _event_short_only_metadata(event).get("entry_mode") == "early_5m_starter_short"
+        ),
+        "golden_15m_candidates": sum(
+            1 for event in all_candidate_events if _event_short_only_metadata(event).get("entry_mode") == "golden_15m_short_breakout"
+        ),
+        "golden_3tf_shadow_only": sum(1 for event in events if event.get("action") == "golden_baseline_shadow_only"),
         "upsize_candidates": len(upsize_candidate_events),
         "positive_ev_short_candidates": sum(1 for event in all_candidate_events if bool(event.get("edge_gate_passed", False))),
         "shorts_opened": len(approved),

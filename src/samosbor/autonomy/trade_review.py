@@ -98,6 +98,7 @@ def build_trade_review_payload(
         "policy_outcomes": _policy_outcomes(reviews),
         "weak_choppy_direct_probe_review": _weak_choppy_direct_probe_review(reviews, parsed_events),
         "short_only_review": _short_only_review(portfolio, reviews, parsed_events),
+        "golden_3tf_review": _golden_3tf_review(reviews, parsed_events),
         "selloff_capture_review": _selloff_capture_review(reviews, parsed_events),
         "underallocation_review": _underallocation_review(parsed_events),
         "long_during_selloff_review": _long_during_selloff_review(reviews, parsed_events),
@@ -1343,6 +1344,85 @@ def _short_only_review(
     }
 
 
+def _golden_3tf_review(
+    reviews: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    config_events = [event for event in events if event.get("action") == "golden_baseline_config"]
+    latest_config = config_events[-1] if config_events else {}
+    candidate_events = [
+        event
+        for event in events
+        if event.get("action") in {"short_only_short_candidate", "short_only_upsize_candidate"}
+        and _event_golden_3tf(event)
+    ]
+    signal_events = [
+        event
+        for event in events
+        if event.get("action") == "signal" and _event_golden_3tf(event)
+    ]
+    approved = [event for event in signal_events if bool(event.get("approved", False))]
+    rejected = [event for event in signal_events if not bool(event.get("approved", False))]
+    shadow_events = [event for event in events if event.get("action") == "golden_baseline_shadow_only"]
+    golden_reviews = [review for review in reviews if _review_golden_3tf(review)]
+    failed_conditions = Counter(
+        str(reason)
+        for event in candidate_events + signal_events + shadow_events
+        for reason in _golden_failed_conditions(_event_golden_3tf(event))
+        if str(reason).strip()
+    )
+    verdict_counts = Counter(
+        str(_event_golden_3tf(event).get("verdict", "unknown") or "unknown")
+        for event in candidate_events
+    )
+    entry_mode_counts = Counter(
+        str(_event_golden_3tf(event).get("entry_mode", "unknown") or "unknown")
+        for event in candidate_events
+    )
+    review_modes = sorted(
+        {
+            str(_review_golden_3tf(review).get("entry_mode", "unknown") or "unknown")
+            for review in golden_reviews
+        }
+    )
+    return {
+        "enabled": bool(config_events or candidate_events or golden_reviews),
+        "source_run": latest_config.get("source_run") or _first_golden_field(candidate_events, "source_run"),
+        "source_commit": latest_config.get("source_commit") or _first_golden_field(candidate_events, "source_commit"),
+        "timeframes": {
+            "primary": latest_config.get("primary_timeframe") or _first_golden_timeframe(candidate_events, "primary"),
+            "early_trigger": latest_config.get("early_trigger_timeframe") or _first_golden_timeframe(candidate_events, "early_trigger"),
+            "execution_guard": latest_config.get("execution_guard_timeframe") or _first_golden_timeframe(candidate_events, "execution_guard"),
+            "forbidden": list(latest_config.get("forbidden_timeframes", []))
+            if isinstance(latest_config.get("forbidden_timeframes", []), list)
+            else [],
+        },
+        "allow_live_trading": latest_config.get("allow_live_trading"),
+        "execution_mode": latest_config.get("execution_mode"),
+        "candidate_events": len(candidate_events),
+        "golden_15m_candidates": entry_mode_counts.get("golden_15m_short_breakout", 0),
+        "early_5m_starter_candidates": entry_mode_counts.get("early_5m_starter_short", 0),
+        "passed_candidates": verdict_counts.get("passed", 0),
+        "shadow_only_candidates": verdict_counts.get("shadow_only", 0),
+        "approved_signals": len(approved),
+        "rejected_signals": len(rejected),
+        "shadow_only_events": len(shadow_events),
+        "top_failed_conditions": dict(
+            sorted(failed_conditions.items(), key=lambda item: (-item[1], item[0]))[:15]
+        ),
+        "candidate_entry_modes": dict(sorted(entry_mode_counts.items())),
+        "candidate_verdicts": dict(sorted(verdict_counts.items())),
+        "pnl_total": _pnl_for_reviews(golden_reviews),
+        "pnl_by_entry_mode": {
+            mode: _pnl_for_reviews(
+                [review for review in golden_reviews if str(_review_golden_3tf(review).get("entry_mode", "unknown")) == mode]
+            )
+            for mode in review_modes
+        },
+        "pnl_by_verdict": _golden_pnl_by_verdict(golden_reviews),
+    }
+
+
 def _underallocation_review(events: list[dict[str, object]]) -> dict[str, object]:
     underallocated = [event for event in events if event.get("action") == "selloff_underallocated"]
     budget_events = [
@@ -1831,6 +1911,70 @@ def _event_short_only(event: dict[str, object]) -> dict[str, object]:
         return {}
     short_only = metadata.get("short_only", {})
     return dict(short_only) if isinstance(short_only, dict) else {}
+
+
+def _event_golden_3tf(event: dict[str, object]) -> dict[str, object]:
+    metadata = event.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    direct = metadata.get("golden_3tf", {})
+    if isinstance(direct, dict) and direct:
+        return dict(direct)
+    short_only = _event_short_only(event)
+    nested = short_only.get("golden_3tf", {})
+    return dict(nested) if isinstance(nested, dict) else {}
+
+
+def _review_golden_3tf(review: dict[str, object]) -> dict[str, object]:
+    metadata = review.get("entry_metadata", {})
+    if not isinstance(metadata, dict):
+        return {}
+    direct = metadata.get("golden_3tf", {})
+    if isinstance(direct, dict) and direct:
+        return dict(direct)
+    short_only = metadata.get("short_only", {})
+    if not isinstance(short_only, dict):
+        return {}
+    nested = short_only.get("golden_3tf", {})
+    return dict(nested) if isinstance(nested, dict) else {}
+
+
+def _golden_failed_conditions(payload: dict[str, object]) -> list[object]:
+    if not isinstance(payload, dict):
+        return []
+    conditions = payload.get("failed_conditions", [])
+    return conditions if isinstance(conditions, list) else []
+
+
+def _first_golden_field(events: list[dict[str, object]], key: str) -> object:
+    for event in events:
+        value = _event_golden_3tf(event).get(key)
+        if value:
+            return value
+    return ""
+
+
+def _first_golden_timeframe(events: list[dict[str, object]], key: str) -> object:
+    for event in events:
+        timeframes = _event_golden_3tf(event).get("timeframes", {})
+        if isinstance(timeframes, dict) and timeframes.get(key):
+            return timeframes[key]
+    return ""
+
+
+def _golden_pnl_by_verdict(reviews: list[dict[str, object]]) -> dict[str, object]:
+    verdicts = sorted(
+        {
+            str(_review_golden_3tf(review).get("verdict", "unknown") or "unknown")
+            for review in reviews
+        }
+    )
+    return {
+        verdict: _pnl_for_reviews(
+            [review for review in reviews if str(_review_golden_3tf(review).get("verdict", "unknown")) == verdict]
+        )
+        for verdict in verdicts
+    }
 
 
 def _short_only_hard_reasons(event: dict[str, object]) -> list[object]:
@@ -2422,6 +2566,21 @@ def _render_markdown(payload: dict[str, object]) -> str:
         lines.append(f"- Shorts opened: {short_only.get('shorts_opened', 0)}")
         lines.append(f"- Budget used: {short_only.get('budget_used', 0.0)} / {short_only.get('budget_target', 0.0)}")
         lines.append(f"- Underallocated events: {short_only.get('underallocated_count', 0)}")
+
+    golden = payload.get("golden_3tf_review", {})
+    if isinstance(golden, dict) and golden.get("enabled"):
+        lines.append("")
+        lines.append("## Golden 3TF Baseline Review")
+        lines.append(f"- Source: {golden.get('source_run', '')} / {str(golden.get('source_commit', ''))[:12]}")
+        lines.append(f"- Timeframes: {golden.get('timeframes', {})}")
+        lines.append(f"- Candidates: {golden.get('candidate_events', 0)}")
+        lines.append(f"- 15m full: {golden.get('golden_15m_candidates', 0)}")
+        lines.append(f"- Early 5m starters: {golden.get('early_5m_starter_candidates', 0)}")
+        lines.append(f"- Passed / shadow-only: {golden.get('passed_candidates', 0)} / {golden.get('shadow_only_candidates', 0)}")
+        lines.append(f"- Approved / rejected signals: {golden.get('approved_signals', 0)} / {golden.get('rejected_signals', 0)}")
+        failed = golden.get("top_failed_conditions", {})
+        if isinstance(failed, dict) and failed:
+            lines.append("- Top failed conditions: " + "; ".join(f"{key}: {value}" for key, value in failed.items()))
 
     selloff = payload.get("selloff_capture_review", {})
     if isinstance(selloff, dict):

@@ -558,6 +558,14 @@ class ShortOnlyMixedBearishOverrideSection:
 
 @dataclass(frozen=True)
 class ShortOnlySizingSection:
+    use_original_risk_manager: bool = True
+    max_risk_per_trade: float = 0.01
+    max_positions: int = 12
+    max_gross_exposure: float = 1.5
+    max_position_exposure_ratio: float = 0.18
+    cash_reserve_ratio: float = 0.08
+    disable_expansion: bool = True
+    disable_one_lot_fallback: bool = True
     market_selloff_impulse: ShortOnlySizingRegimeSection = field(
         default_factory=lambda: ShortOnlySizingRegimeSection(
             target_gross_exposure=1.00,
@@ -644,9 +652,22 @@ class ShortOnlyMlSection:
     positive_edge_is_required_but_not_sufficient: bool = True
     ml_positive_standalone_real_trading: bool = False
     negative_edge_action: str = "no_trade"
+    low_quality_action: str = "no_trade"
     missing_model_action: str = "no_trade"
     positive_edge_multiplier: float = 1.0
     weak_positive_edge_multiplier: float = 0.5
+
+
+@dataclass(frozen=True)
+class ShortOnlyRealTradeSourcesSection:
+    strategy_short: bool = True
+    early_5m_starter: bool = True
+    synthetic: bool = False
+    ml_only: bool = False
+    price_action_fallback: bool = False
+    upsize: bool = False
+    mixed_bearish: bool = False
+    expanded_sizing: bool = False
 
 
 @dataclass(frozen=True)
@@ -723,6 +744,9 @@ class ShortOnlySection:
     allow_synthetic_short_candidates: bool = True
     allow_existing_short_upsize: bool = False
     paper_exposure_sizing_enabled: bool = False
+    real_trade_sources: ShortOnlyRealTradeSourcesSection = field(
+        default_factory=ShortOnlyRealTradeSourcesSection
+    )
     mixed_bearish_override: ShortOnlyMixedBearishOverrideSection = field(
         default_factory=ShortOnlyMixedBearishOverrideSection
     )
@@ -795,6 +819,102 @@ class ResearchSection:
 
 
 @dataclass(frozen=True)
+class GoldenBaselineTimeframesSection:
+    primary: str = "15min"
+    early_trigger: str = "5min"
+    execution_guard: str = "1min"
+
+
+@dataclass(frozen=True)
+class GoldenBaselineEarly5mTriggerSection:
+    ema_window: int = 9
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+    rsi_window: int = 14
+    rsi_min: float = 25.0
+    rsi_max: float = 55.0
+    rolling_low_window_min: int = 6
+    rolling_low_window_max: int = 12
+    max_close_position: float = 0.35
+    max_adverse_ret: float = 0.005
+
+
+@dataclass(frozen=True)
+class GoldenBaselineEarly5mPromotionSection:
+    enabled: bool = True
+    deadline_15m_bars: int = 1
+    close_if_not_promoted: bool = True
+    allow_size_add_on_promotion: bool = False
+    promoted_entry_mode: str = "golden_15m_short_breakout_promoted"
+
+
+@dataclass(frozen=True)
+class GoldenBaselineEarly5mFailureExitSection:
+    enabled: bool = True
+    check_after_minutes: int = 5
+    close_if_pnl_negative_and_no_continuation: bool = True
+    reason: str = "early_5m_failed_fast"
+
+
+@dataclass(frozen=True)
+class GoldenBaselineEarly5mSection:
+    enabled: bool = True
+    real_trading_enabled: bool = True
+    starter_size_multiplier: float = 0.25
+    max_positions: int = 3
+    max_new_entries_per_cycle: int = 2
+    require_15m_bearish_context: bool = True
+    require_5m_breakdown: bool = True
+    require_1m_execution_guard: bool = True
+    promotion_deadline_15m_bars: int = 1
+    close_if_not_promoted: bool = True
+    shadow_all_rejected: bool = True
+    trigger: GoldenBaselineEarly5mTriggerSection = field(
+        default_factory=GoldenBaselineEarly5mTriggerSection
+    )
+    promotion: GoldenBaselineEarly5mPromotionSection = field(
+        default_factory=GoldenBaselineEarly5mPromotionSection
+    )
+    failure_exit: GoldenBaselineEarly5mFailureExitSection = field(
+        default_factory=GoldenBaselineEarly5mFailureExitSection
+    )
+
+
+@dataclass(frozen=True)
+class GoldenBaselineExecution1mSection:
+    enabled: bool = True
+    required_for_early_5m: bool = True
+    required_for_15m: bool = False
+    lookback_bars: int = 3
+    block_if_rebound_bars: int = 2
+    max_positive_rebound_ret: float = 0.003
+    max_close_position_after_rebound: float = 0.65
+    block_if_price_above_5m_ema9: bool = True
+    block_if_order_book_deteriorates: bool = True
+    fallback_for_15m: str = "allow_with_metadata"
+    fallback_for_early_5m: str = "shadow_only"
+
+
+@dataclass(frozen=True)
+class GoldenBaselineSection:
+    enabled: bool = False
+    name: str = "ema_adx_macd_short_breakout_v1_3tf"
+    source_run: str = "20260707-105708"
+    source_commit: str = "56be2bda69876f917731f81d913fa32aa9aad8b5"
+    real_trading_profile: bool = True
+    timeframes: list[str] = field(default_factory=lambda: ["15min", "5min", "1min"])
+    forbidden_timeframes: list[str] = field(default_factory=lambda: ["10min"])
+    timeframes_config: GoldenBaselineTimeframesSection = field(
+        default_factory=GoldenBaselineTimeframesSection
+    )
+    early_5m: GoldenBaselineEarly5mSection = field(default_factory=GoldenBaselineEarly5mSection)
+    execution_1m: GoldenBaselineExecution1mSection = field(
+        default_factory=GoldenBaselineExecution1mSection
+    )
+
+
+@dataclass(frozen=True)
 class AppConfig:
     root_dir: Path
     app: AppSection
@@ -819,6 +939,7 @@ class AppConfig:
     market_selloff_impulse: MarketSelloffImpulseSection = field(default_factory=MarketSelloffImpulseSection)
     paper_alpha_capture: PaperAlphaCaptureSection = field(default_factory=PaperAlphaCaptureSection)
     short_only: ShortOnlySection = field(default_factory=ShortOnlySection)
+    golden_baseline: GoldenBaselineSection = field(default_factory=GoldenBaselineSection)
 
     def resolve_path(self, value: str) -> Path:
         path = Path(value)
@@ -985,8 +1106,13 @@ def _parse_regime_long_policy(
 def _parse_short_only_sizing(payload: dict[str, Any] | None) -> ShortOnlySizingSection:
     default = ShortOnlySizingSection()
     raw = payload if isinstance(payload, dict) else {}
-    return ShortOnlySizingSection(
-        market_selloff_impulse=ShortOnlySizingRegimeSection(
+    values = {
+        **default.__dict__,
+        **_dataclass_payload(ShortOnlySizingSection, raw),
+    }
+    values.update(
+        {
+        "market_selloff_impulse": ShortOnlySizingRegimeSection(
             **{
                 **default.market_selloff_impulse.__dict__,
                 **_dataclass_payload(
@@ -997,7 +1123,7 @@ def _parse_short_only_sizing(payload: dict[str, Any] | None) -> ShortOnlySizingS
                 ),
             }
         ),
-        clean_downtrend=ShortOnlySizingRegimeSection(
+        "clean_downtrend": ShortOnlySizingRegimeSection(
             **{
                 **default.clean_downtrend.__dict__,
                 **_dataclass_payload(
@@ -1006,7 +1132,7 @@ def _parse_short_only_sizing(payload: dict[str, Any] | None) -> ShortOnlySizingS
                 ),
             }
         ),
-        weak_down_choppy=ShortOnlySizingRegimeSection(
+        "weak_down_choppy": ShortOnlySizingRegimeSection(
             **{
                 **default.weak_down_choppy.__dict__,
                 **_dataclass_payload(
@@ -1015,7 +1141,7 @@ def _parse_short_only_sizing(payload: dict[str, Any] | None) -> ShortOnlySizingS
                 ),
             }
         ),
-        mixed_bearish=ShortOnlySizingRegimeSection(
+        "mixed_bearish": ShortOnlySizingRegimeSection(
             **{
                 **default.mixed_bearish.__dict__,
                 **_dataclass_payload(
@@ -1024,7 +1150,7 @@ def _parse_short_only_sizing(payload: dict[str, Any] | None) -> ShortOnlySizingS
                 ),
             }
         ),
-        range_chop=ShortOnlySizingRegimeSection(
+        "range_chop": ShortOnlySizingRegimeSection(
             **{
                 **default.range_chop.__dict__,
                 **_dataclass_payload(
@@ -1033,7 +1159,82 @@ def _parse_short_only_sizing(payload: dict[str, Any] | None) -> ShortOnlySizingS
                 ),
             }
         ),
+        }
     )
+    return ShortOnlySizingSection(**values)
+
+
+def _parse_golden_baseline(payload: dict[str, Any] | None) -> GoldenBaselineSection:
+    default = GoldenBaselineSection()
+    raw = payload if isinstance(payload, dict) else {}
+    values = {
+        **default.__dict__,
+        **_dataclass_payload(GoldenBaselineSection, raw),
+    }
+    timeframes_raw = raw.get("timeframes", {})
+    if isinstance(timeframes_raw, dict):
+        timeframes_config = GoldenBaselineTimeframesSection(
+            **{
+                **default.timeframes_config.__dict__,
+                **_dataclass_payload(GoldenBaselineTimeframesSection, timeframes_raw),
+            }
+        )
+        values["timeframes_config"] = timeframes_config
+        values["timeframes"] = [
+            timeframes_config.primary,
+            timeframes_config.early_trigger,
+            timeframes_config.execution_guard,
+        ]
+    elif isinstance(timeframes_raw, list):
+        values["timeframes"] = [str(item) for item in timeframes_raw]
+    early_raw = raw.get("early_5m", {}) if isinstance(raw.get("early_5m"), dict) else {}
+    default_early = default.early_5m
+    trigger = GoldenBaselineEarly5mTriggerSection(
+        **{
+            **default_early.trigger.__dict__,
+            **_dataclass_payload(
+                GoldenBaselineEarly5mTriggerSection,
+                early_raw.get("trigger", {}) if isinstance(early_raw.get("trigger"), dict) else {},
+            ),
+        }
+    )
+    promotion = GoldenBaselineEarly5mPromotionSection(
+        **{
+            **default_early.promotion.__dict__,
+            **_dataclass_payload(
+                GoldenBaselineEarly5mPromotionSection,
+                early_raw.get("promotion", {}) if isinstance(early_raw.get("promotion"), dict) else {},
+            ),
+        }
+    )
+    failure_exit = GoldenBaselineEarly5mFailureExitSection(
+        **{
+            **default_early.failure_exit.__dict__,
+            **_dataclass_payload(
+                GoldenBaselineEarly5mFailureExitSection,
+                early_raw.get("failure_exit", {}) if isinstance(early_raw.get("failure_exit"), dict) else {},
+            ),
+        }
+    )
+    values["early_5m"] = GoldenBaselineEarly5mSection(
+        **{
+            **default_early.__dict__,
+            **_dataclass_payload(GoldenBaselineEarly5mSection, early_raw),
+            "trigger": trigger,
+            "promotion": promotion,
+            "failure_exit": failure_exit,
+        }
+    )
+    values["execution_1m"] = GoldenBaselineExecution1mSection(
+        **{
+            **default.execution_1m.__dict__,
+            **_dataclass_payload(
+                GoldenBaselineExecution1mSection,
+                raw.get("execution_1m", {}) if isinstance(raw.get("execution_1m"), dict) else {},
+            ),
+        }
+    )
+    return GoldenBaselineSection(**values)
 
 
 def _parse_short_only(payload: dict[str, Any] | None, *, execution_mode: TradeMode) -> ShortOnlySection:
@@ -1043,6 +1244,15 @@ def _parse_short_only(payload: dict[str, Any] | None, *, execution_mode: TradeMo
         **default.__dict__,
         **_dataclass_payload(ShortOnlySection, raw),
     }
+    values["real_trade_sources"] = ShortOnlyRealTradeSourcesSection(
+        **{
+            **default.real_trade_sources.__dict__,
+            **_dataclass_payload(
+                ShortOnlyRealTradeSourcesSection,
+                raw.get("real_trade_sources", {}) if isinstance(raw.get("real_trade_sources"), dict) else {},
+            ),
+        }
+    )
     values["mixed_bearish_override"] = ShortOnlyMixedBearishOverrideSection(
         **{
             **default.mixed_bearish_override.__dict__,
@@ -1166,7 +1376,30 @@ def load_config(config_path: str | Path) -> AppConfig:
         instruments=instruments,
     )
 
-    strategy = StrategySection(**_dataclass_payload(StrategySection, raw.get("strategy", {})))
+    strategy_values = _dataclass_payload(StrategySection, raw.get("strategy", {}))
+    entry_confirmation_raw = raw.get("entry_confirmation", {})
+    if isinstance(entry_confirmation_raw, dict):
+        entry_aliases = {
+            "timeframe": "entry_confirmation_timeframe",
+            "min_bars": "entry_confirmation_min_bars",
+            "max_adverse_ret": "entry_confirmation_max_adverse_ret",
+        }
+        for raw_key, strategy_key in entry_aliases.items():
+            if raw_key in entry_confirmation_raw:
+                strategy_values[strategy_key] = entry_confirmation_raw[raw_key]
+    order_book_raw = raw.get("order_book", {})
+    if isinstance(order_book_raw, dict):
+        order_book_aliases = {
+            "depth": "order_book_depth",
+            "require_order_book": "require_order_book",
+            "max_entry_spread_bps": "max_entry_spread_bps",
+            "min_entry_liquidity_cover": "min_entry_liquidity_cover",
+            "min_entry_book_imbalance": "min_entry_book_imbalance",
+        }
+        for raw_key, strategy_key in order_book_aliases.items():
+            if raw_key in order_book_raw:
+                strategy_values[strategy_key] = order_book_raw[raw_key]
+    strategy = StrategySection(**strategy_values)
     risk_raw = raw.get("risk", {})
     risk = RiskSection(**_dataclass_payload(RiskSection, risk_raw))
 
@@ -1385,6 +1618,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         paper_alpha_values["enabled"] = False
     paper_alpha_capture = PaperAlphaCaptureSection(**paper_alpha_values)
     short_only = _parse_short_only(raw.get("short_only", {}), execution_mode=execution.mode)
+    golden_baseline = _parse_golden_baseline(raw.get("golden_baseline", {}))
     if short_only.enabled:
         side_policy = SidePolicySection(
             long=LongSidePolicySection(
@@ -1421,6 +1655,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         market_selloff_impulse=market_selloff_impulse,
         paper_alpha_capture=paper_alpha_capture,
         short_only=short_only,
+        golden_baseline=golden_baseline,
         execution=execution,
         backtest=backtest,
         reporting=reporting,

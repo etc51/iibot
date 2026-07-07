@@ -35,6 +35,8 @@ class ExitReason(str, Enum):
     MANUAL = "manual"
     SHORT_ONLY_POLICY_FLATTEN_LONG = "short_only_policy_flatten_long"
     SHORT_ONLY_EARLY_LOSS_GUARD = "short_only_early_loss_guard"
+    EARLY_5M_FAILED_FAST = "early_5m_failed_fast"
+    EARLY_5M_NOT_PROMOTED = "early_5m_not_promoted"
 
 
 @dataclass(frozen=True)

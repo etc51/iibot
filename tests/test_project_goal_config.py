@@ -23,6 +23,7 @@ def test_focused_runtime_matches_project_goal():
     assert config.strategy.allowed_entry_hours == []
     assert config.strategy.allowed_entry_weekdays == []
     assert config.strategy.forced_flat_hours == []
+    assert config.strategy.require_breakout is True
     assert config.strategy.entry_confirmation_timeframe == "5min"
     assert config.strategy.entry_confirmation_max_adverse_ret == 0.005
     assert config.strategy.take_profit_activates_runner is True
@@ -55,6 +56,14 @@ def test_focused_runtime_matches_project_goal():
     assert config.paper_alpha_capture.enabled is True
     assert config.paper_alpha_capture.profile == "aggressive_paper_alpha"
     assert config.paper_alpha_capture.target_gross_exposure_selloff == 1.00
+    assert config.golden_baseline.enabled is True
+    assert config.golden_baseline.source_run == "20260707-105708"
+    assert config.golden_baseline.source_commit == "56be2bda69876f917731f81d913fa32aa9aad8b5"
+    assert config.golden_baseline.timeframes == ["15min", "5min", "1min"]
+    assert config.golden_baseline.forbidden_timeframes == ["10min"]
+    assert config.golden_baseline.early_5m.starter_size_multiplier == 0.25
+    assert config.golden_baseline.early_5m.max_positions == 3
+    assert config.golden_baseline.execution_1m.required_for_early_5m is True
     assert config.short_only.enabled is True
     assert config.short_only.disable_all_longs is True
     assert config.short_only.flatten_existing_longs is True
@@ -76,6 +85,14 @@ def test_focused_runtime_matches_project_goal():
     assert config.short_only.upsize.shadow_only is True
     assert config.short_only.paper_exposure_sizing_enabled is False
     assert config.short_only.paper_exposure_sizing.enabled is False
+    assert config.short_only.real_trade_sources.strategy_short is True
+    assert config.short_only.real_trade_sources.early_5m_starter is True
+    assert config.short_only.real_trade_sources.synthetic is False
+    assert config.short_only.real_trade_sources.ml_only is False
+    assert config.short_only.real_trade_sources.price_action_fallback is False
+    assert config.short_only.real_trade_sources.upsize is False
+    assert config.short_only.real_trade_sources.mixed_bearish is False
+    assert config.short_only.real_trade_sources.expanded_sizing is False
     assert config.short_only.mixed_bearish_override.enabled is True
     assert config.short_only.mixed_bearish_override.min_breadth_down == 0.70
     assert config.short_only.mixed_bearish_override.real_trading_enabled is False
@@ -83,20 +100,20 @@ def test_focused_runtime_matches_project_goal():
     assert config.short_only.edge.min_expected_net_edge_rub == 5.0
     assert config.short_only.edge.allow_price_action_edge_in_mixed_bearish is True
     assert config.short_only.sizing.market_selloff_impulse.target_gross_exposure == 1.00
-    assert config.short_only.sizing.market_selloff_impulse.max_positions == 20
-    assert config.short_only.sizing.market_selloff_impulse.max_new_shorts_per_cycle == 20
-    assert config.short_only.sizing.market_selloff_impulse.per_symbol_exposure_target == 0.12
-    assert config.short_only.sizing.market_selloff_impulse.per_symbol_exposure_max == 0.18
-    assert config.short_only.sizing.clean_downtrend.target_gross_exposure == 1.00
-    assert config.short_only.sizing.clean_downtrend.max_positions == 20
+    assert config.short_only.sizing.market_selloff_impulse.max_positions == 12
+    assert config.short_only.sizing.market_selloff_impulse.max_new_shorts_per_cycle == 12
+    assert config.short_only.sizing.market_selloff_impulse.per_symbol_exposure_target == 0.08
+    assert config.short_only.sizing.market_selloff_impulse.per_symbol_exposure_max == 0.12
+    assert config.short_only.sizing.clean_downtrend.target_gross_exposure == 0.70
+    assert config.short_only.sizing.clean_downtrend.max_positions == 10
     assert config.short_only.sizing.market_selloff_impulse.max_risk_quantity_expansion == 1.0
     assert config.short_only.sizing.clean_downtrend.max_risk_quantity_expansion == 1.0
-    assert config.short_only.sizing.weak_down_choppy.target_gross_exposure == 0.15
-    assert config.short_only.sizing.weak_down_choppy.max_gross_exposure == 0.25
-    assert config.short_only.sizing.weak_down_choppy.max_positions == 3
-    assert config.short_only.sizing.weak_down_choppy.max_new_shorts_per_cycle == 2
-    assert config.short_only.sizing.weak_down_choppy.per_symbol_exposure_target == 0.03
-    assert config.short_only.sizing.weak_down_choppy.per_symbol_exposure_max == 0.05
+    assert config.short_only.sizing.weak_down_choppy.target_gross_exposure == 0.35
+    assert config.short_only.sizing.weak_down_choppy.max_gross_exposure == 0.60
+    assert config.short_only.sizing.weak_down_choppy.max_positions == 6
+    assert config.short_only.sizing.weak_down_choppy.max_new_shorts_per_cycle == 6
+    assert config.short_only.sizing.weak_down_choppy.per_symbol_exposure_target == 0.04
+    assert config.short_only.sizing.weak_down_choppy.per_symbol_exposure_max == 0.07
     assert config.short_only.sizing.weak_down_choppy.max_risk_quantity_expansion == 1.0
     assert config.short_only.sizing.mixed_bearish.target_gross_exposure == 0.0
     assert config.short_only.sizing.mixed_bearish.max_positions == 0
