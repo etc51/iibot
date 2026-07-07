@@ -55,6 +55,20 @@ def test_focused_runtime_matches_project_goal():
     assert config.paper_alpha_capture.enabled is True
     assert config.paper_alpha_capture.profile == "aggressive_paper_alpha"
     assert config.paper_alpha_capture.target_gross_exposure_selloff == 1.00
+    assert config.short_only.enabled is True
+    assert config.short_only.disable_all_longs is True
+    assert config.short_only.flatten_existing_longs is True
+    assert config.short_only.no_trade_in_range_chop is True
+    assert config.short_only.allow_shorts_only_in_regimes == [
+        "market_selloff_impulse",
+        "clean_downtrend",
+        "weak_down_choppy",
+    ]
+    assert config.short_only.edge.min_expected_net_edge_rub == 5.0
+    assert config.short_only.sizing.market_selloff_impulse.target_gross_exposure == 1.00
+    assert config.short_only.sizing.clean_downtrend.target_gross_exposure == 0.70
+    assert config.short_only.sizing.weak_down_choppy.target_gross_exposure == 0.35
+    assert config.short_only.microstructure.hard_max_spread_bps == 40.0
     assert config.regime_policy.weak_down_choppy.short_direct_probe_enabled is True
     assert config.regime_policy.weak_down_choppy.short_direct_probe_min_signal_strength == 0.15
     assert config.regime_policy.weak_down_choppy.short_direct_exploration_min_signal_strength == 0.08
@@ -65,7 +79,9 @@ def test_focused_runtime_matches_project_goal():
     assert config.regime_policy.weak_down_choppy.create_pullback_addon_after_direct_probe is True
     assert config.regime_policy.weak_down_choppy.pullback_addon_multiplier == 0.15
     assert config.regime_policy.weak_down_choppy.long.allow_normal_long is False
-    assert config.side_policy.long.normal_enabled is True
+    assert config.side_policy.long.normal_enabled is False
+    assert config.side_policy.long.probe_enabled is False
+    assert config.side_policy.long.exploration_enabled is False
     assert config.side_policy.long.full_size_long_requires_clean_uptrend is True
     assert config.side_policy.long.exploration_risk_multiplier == 0.05
     assert config.market_selloff_impulse.basket.enabled is True
@@ -200,4 +216,25 @@ def test_aggressive_paper_alpha_disabled_outside_local_paper(tmp_path: Path):
     )
 
     assert config.paper_alpha_capture.enabled is False
+    assert config.execution.allow_live_trading is False
+
+
+def test_short_only_disabled_outside_local_paper(tmp_path: Path):
+    config = load_config(
+        _write_config(
+            tmp_path,
+            "\n".join(
+                [
+                    "[short_only]",
+                    "enabled = true",
+                    "",
+                    "[execution]",
+                    'mode = "tbank-sandbox"',
+                    "allow_live_trading = false",
+                ]
+            ),
+        )
+    )
+
+    assert config.short_only.enabled is False
     assert config.execution.allow_live_trading is False

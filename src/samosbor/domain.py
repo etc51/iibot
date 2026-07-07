@@ -32,6 +32,7 @@ class ExitReason(str, Enum):
     RISK_HALT = "risk-halt"
     END_OF_TEST = "end-of-test"
     MANUAL = "manual"
+    SHORT_ONLY_POLICY_FLATTEN_LONG = "short_only_policy_flatten_long"
 
 
 @dataclass(frozen=True)

@@ -59,6 +59,14 @@ def build_trade_review_payload(
         risk=risk,
     )
     summary = _summary(reviews)
+    short_only_enabled = _short_only_enabled(reviews, parsed_events)
+    long_learning = _long_learning_review(reviews, parsed_events)
+    if short_only_enabled:
+        long_learning = {
+            **long_learning,
+            "active": False,
+            "legacy_only": True,
+        }
     return with_runtime_metadata({
         "generated_at": generated_at.isoformat(),
         "timezone": timezone_name,
@@ -89,10 +97,11 @@ def build_trade_review_payload(
         "policy_signal_distribution": _policy_signal_distribution(parsed_events),
         "policy_outcomes": _policy_outcomes(reviews),
         "weak_choppy_direct_probe_review": _weak_choppy_direct_probe_review(reviews, parsed_events),
+        "short_only_review": _short_only_review(reviews, parsed_events),
         "selloff_capture_review": _selloff_capture_review(reviews, parsed_events),
         "underallocation_review": _underallocation_review(parsed_events),
         "long_during_selloff_review": _long_during_selloff_review(reviews, parsed_events),
-        "long_learning_review": _long_learning_review(reviews, parsed_events),
+        "long_learning_review": long_learning,
         "strict_vs_relaxed": _strict_vs_relaxed_review(reviews, parsed_events),
         "blocker_review": _blocker_review(parsed_events),
         "learning_caps": _learning_cap_metrics(reviews, parsed_events),
@@ -1165,6 +1174,59 @@ def _selloff_capture_review(
     }
 
 
+def _short_only_review(
+    reviews: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    enabled = _short_only_enabled(reviews, events)
+    candidate_events = [event for event in events if event.get("action") == "short_only_short_candidate"]
+    short_only_signals = [
+        event
+        for event in events
+        if event.get("action") == "signal" and _event_short_only(event).get("enabled") is True
+    ]
+    approved = [event for event in short_only_signals if bool(event.get("approved", False))]
+    blocked = [event for event in short_only_signals if not bool(event.get("approved", False))]
+    short_only_reviews = [
+        review
+        for review in reviews
+        if isinstance(review.get("entry_metadata", {}), dict)
+        and isinstance(review.get("entry_metadata", {}).get("short_only", {}), dict)
+        and bool(review.get("entry_metadata", {}).get("short_only", {}).get("enabled", False))
+    ]
+    expected_edges = [
+        float(event.get("expected_net_edge_rub", 0.0) or 0.0)
+        for event in candidate_events
+        if bool(event.get("edge_gate_passed", False))
+    ]
+    budget_events = [event for event in events if event.get("action") == "short_only_budget_allocation"]
+    latest_budget = _latest_short_only_budget(budget_events)
+    hard_reasons = Counter(
+        str(reason)
+        for event in blocked
+        for reason in _short_only_hard_reasons(event)
+        if str(reason).strip()
+    )
+    return {
+        "short_only_enabled": enabled,
+        "long_signals_ignored": sum(1 for event in events if event.get("action") == "long_signal_ignored_short_only"),
+        "longs_flattened": sum(1 for event in events if event.get("action") == "long_position_flattened_short_only"),
+        "no_trade_range_chop_count": sum(1 for event in events if event.get("action") == "range_chop_no_trade_short_only"),
+        "short_candidates_total": len(candidate_events),
+        "positive_ev_short_candidates": sum(1 for event in candidate_events if bool(event.get("edge_gate_passed", False))),
+        "shorts_opened": len(approved),
+        "shorts_blocked_hard": len(blocked),
+        "average_expected_edge": round(sum(expected_edges) / len(expected_edges), 2) if expected_edges else 0.0,
+        "realized_pnl_short_only": _pnl_for_reviews(short_only_reviews),
+        "pnl_by_regime": _group_breakdown(short_only_reviews, "market_regime") if short_only_reviews else [],
+        "pnl_by_edge_bucket": _pnl_by_short_only_edge_bucket(short_only_reviews),
+        "budget_target": latest_budget.get("budget_target_gross_rub", 0.0),
+        "budget_used": latest_budget.get("budget_used_gross_rub", 0.0),
+        "underallocated_count": sum(1 for event in events if event.get("action") == "short_only_underallocated"),
+        "top_hard_block_reasons": dict(sorted(hard_reasons.items(), key=lambda item: (-item[1], item[0]))[:10]),
+    }
+
+
 def _underallocation_review(events: list[dict[str, object]]) -> dict[str, object]:
     underallocated = [event for event in events if event.get("action") == "selloff_underallocated"]
     budget_events = [
@@ -1647,6 +1709,79 @@ def _event_entry_mode(event: dict[str, object]) -> str:
     return str(event.get("entry_mode", metadata.get("entry_mode", policy.get("entry_mode", ""))) or "")
 
 
+def _event_short_only(event: dict[str, object]) -> dict[str, object]:
+    metadata = event.get("metadata", {})
+    if not isinstance(metadata, dict):
+        return {}
+    short_only = metadata.get("short_only", {})
+    return dict(short_only) if isinstance(short_only, dict) else {}
+
+
+def _short_only_hard_reasons(event: dict[str, object]) -> list[object]:
+    short_only = _event_short_only(event)
+    reasons = short_only.get("hard_reasons", [])
+    if isinstance(reasons, list):
+        return reasons
+    reason = event.get("reason", "")
+    return [reason] if reason else []
+
+
+def _short_only_enabled(
+    reviews: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> bool:
+    if any(event.get("action") == "short_only_cycle_start" for event in events):
+        return True
+    for review in reviews:
+        metadata = review.get("entry_metadata", {})
+        if not isinstance(metadata, dict):
+            continue
+        short_only = metadata.get("short_only", {})
+        if isinstance(short_only, dict) and bool(short_only.get("enabled", False)):
+            return True
+    return False
+
+
+def _latest_short_only_budget(events: list[dict[str, object]]) -> dict[str, object]:
+    if not events:
+        return {}
+    ordered = sorted(
+        events,
+        key=lambda event: (
+            event["_timestamp"].timestamp()
+            if isinstance(event.get("_timestamp"), datetime)
+            else 0.0
+        ),
+    )
+    metadata = ordered[-1].get("metadata", {})
+    if isinstance(metadata, dict) and isinstance(metadata.get("short_only_budget"), dict):
+        return dict(metadata["short_only_budget"])
+    return dict(ordered[-1])
+
+
+def _pnl_by_short_only_edge_bucket(reviews: list[dict[str, object]]) -> dict[str, object]:
+    buckets = sorted(
+        {
+            str(review.get("entry_metadata", {}).get("short_only", {}).get("edge_bucket", "unknown"))
+            for review in reviews
+            if isinstance(review.get("entry_metadata", {}), dict)
+            and isinstance(review.get("entry_metadata", {}).get("short_only", {}), dict)
+        }
+    )
+    return {
+        bucket: _pnl_for_reviews(
+            [
+                review
+                for review in reviews
+                if isinstance(review.get("entry_metadata", {}), dict)
+                and isinstance(review.get("entry_metadata", {}).get("short_only", {}), dict)
+                and str(review.get("entry_metadata", {}).get("short_only", {}).get("edge_bucket", "unknown")) == bucket
+            ]
+        )
+        for bucket in buckets
+    }
+
+
 def _pending_event_is_addon(event: dict[str, object]) -> bool:
     metadata = event.get("metadata", {})
     return isinstance(metadata, dict) and bool(metadata.get("is_addon", False))
@@ -1949,6 +2084,18 @@ def _render_markdown(payload: dict[str, object]) -> str:
                 for row in rows[:3]
             ]
             lines.append(f"- {label}: " + "; ".join(preview))
+
+    short_only = payload.get("short_only_review", {})
+    if isinstance(short_only, dict) and short_only.get("short_only_enabled"):
+        lines.append("")
+        lines.append("## Short Only Review")
+        lines.append(f"- Long signals ignored: {short_only.get('long_signals_ignored', 0)}")
+        lines.append(f"- Longs flattened: {short_only.get('longs_flattened', 0)}")
+        lines.append(f"- Short candidates: {short_only.get('short_candidates_total', 0)}")
+        lines.append(f"- Positive-EV candidates: {short_only.get('positive_ev_short_candidates', 0)}")
+        lines.append(f"- Shorts opened: {short_only.get('shorts_opened', 0)}")
+        lines.append(f"- Budget used: {short_only.get('budget_used', 0.0)} / {short_only.get('budget_target', 0.0)}")
+        lines.append(f"- Underallocated events: {short_only.get('underallocated_count', 0)}")
 
     selloff = payload.get("selloff_capture_review", {})
     if isinstance(selloff, dict):

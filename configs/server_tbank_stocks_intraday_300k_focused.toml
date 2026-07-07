@@ -348,6 +348,81 @@ allow_budget_ramp = true
 budget_ramp_step_per_cycle = 0.25
 do_not_wait_for_pullback_in_broad_selloff = true
 
+[short_only]
+enabled = true
+disable_all_longs = true
+flatten_existing_longs = true
+no_trade_in_range_chop = true
+allow_shorts_only_in_regimes = ["market_selloff_impulse", "clean_downtrend", "weak_down_choppy"]
+allow_mixed_regime_shorts = false
+pullback_is_addon_not_required = true
+ml_is_edge_gate_not_blocker = true
+microstructure_is_size_modifier_not_blocker = true
+confirmation_is_size_modifier_not_blocker = true
+
+[short_only.edge]
+min_expected_net_edge_rub = 5.0
+min_expected_net_edge_per_lot_rub = 0.0
+required_edge_buffer_bps = 2.0
+allow_price_action_edge_in_selloff = true
+allow_ml_fallback_when_model_missing = true
+
+[short_only.sizing.market_selloff_impulse]
+target_gross_exposure = 1.00
+max_gross_exposure = 1.25
+max_positions = 12
+max_new_shorts_per_cycle = 12
+per_symbol_exposure_target = 0.08
+per_symbol_exposure_max = 0.12
+
+[short_only.sizing.clean_downtrend]
+target_gross_exposure = 0.70
+max_positions = 10
+max_new_shorts_per_cycle = 8
+per_symbol_exposure_target = 0.06
+per_symbol_exposure_max = 0.10
+
+[short_only.sizing.weak_down_choppy]
+target_gross_exposure = 0.35
+max_positions = 6
+max_new_shorts_per_cycle = 6
+per_symbol_exposure_target = 0.04
+per_symbol_exposure_max = 0.07
+
+[short_only.sizing.range_chop]
+target_gross_exposure = 0.0
+max_positions = 0
+
+[short_only.microstructure]
+hard_max_spread_bps = 40.0
+hard_min_liquidity_cover = 0.4
+hard_min_book_imbalance = -0.95
+soft_spread_bps = 20.0
+soft_liquidity_cover = 1.0
+soft_book_imbalance = -0.60
+soft_multiplier = 0.75
+bad_but_allowed_multiplier = 0.50
+
+[short_only.confirmation]
+selloff_min_5m_bars = 1
+normal_min_5m_bars = 1
+neutral_5m_multiplier = 0.85
+mild_rebound_multiplier = 0.65
+strong_rebound_action = "no_trade"
+extreme_adverse_action = "no_trade"
+
+[short_only.ml]
+allow_if_expected_net_edge_positive = true
+negative_edge_action = "no_trade"
+missing_model_action = "price_action_fallback"
+positive_edge_multiplier = 1.0
+weak_positive_edge_multiplier = 0.5
+
+[short_only.exits]
+use_existing_atr_stop = true
+use_existing_take_profit = true
+use_existing_runner = true
+
 [learning_risk.normal]
 risk_multiplier = 1.0
 max_positions = 12
@@ -400,10 +475,10 @@ strong_rebound_5m_mode = "wait_pullback_only"
 extreme_adverse_5m_mode = "shadow_or_reject"
 
 [side.long]
-normal_enabled = true
+normal_enabled = false
 normal_only_in_regimes = ["clean_uptrend"]
-probe_enabled = true
-exploration_enabled = true
+probe_enabled = false
+exploration_enabled = false
 probe_risk_multiplier = 0.10
 exploration_risk_multiplier = 0.05
 max_long_probe_trades_per_day = 10

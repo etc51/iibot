@@ -210,6 +210,79 @@ def test_trade_review_reports_selloff_capture_and_underallocation():
     assert payload["long_during_selloff_review"]["long_signals_during_selloff"] == 0
 
 
+def test_trade_review_short_only_section_and_legacy_long_learning_marker():
+    opened = datetime(2026, 7, 7, 10, 0, tzinfo=timezone.utc)
+    trades = [
+        _trade(
+            symbol="SBER",
+            entry_time=opened,
+            net_pnl=80.0,
+            signal_strength=0.7,
+            direction=SignalDirection.SHORT,
+            entry_metadata={
+                "market_regime": {"regime": "clean_downtrend", "confidence": 0.8},
+                "short_only": {
+                    "enabled": True,
+                    "expected_net_edge_rub": 120.0,
+                    "edge_bucket": "medium_positive",
+                },
+            },
+        )
+    ]
+    events = [
+        {"timestamp": opened.isoformat(), "action": "short_only_cycle_start"},
+        {
+            "timestamp": opened.isoformat(),
+            "action": "long_signal_ignored_short_only",
+            "symbol": "GAZP",
+        },
+        {
+            "timestamp": opened.isoformat(),
+            "action": "short_only_short_candidate",
+            "symbol": "SBER",
+            "edge_gate_passed": True,
+            "expected_net_edge_rub": 120.0,
+        },
+        {
+            "timestamp": opened.isoformat(),
+            "action": "signal",
+            "symbol": "SBER",
+            "direction": "short",
+            "approved": True,
+            "metadata": {"short_only": {"enabled": True, "hard_reasons": []}},
+        },
+        {
+            "timestamp": opened.isoformat(),
+            "action": "short_only_budget_allocation",
+            "budget_target_gross_rub": 100000.0,
+            "budget_used_gross_rub": 80000.0,
+            "metadata": {
+                "short_only_budget": {
+                    "budget_target_gross_rub": 100000.0,
+                    "budget_used_gross_rub": 80000.0,
+                }
+            },
+        },
+    ]
+
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=80.0),
+        trades,
+        events,
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    assert payload["short_only_review"]["short_only_enabled"] is True
+    assert payload["short_only_review"]["long_signals_ignored"] == 1
+    assert payload["short_only_review"]["positive_ev_short_candidates"] == 1
+    assert payload["short_only_review"]["shorts_opened"] == 1
+    assert payload["short_only_review"]["pnl_by_edge_bucket"]["medium_positive"]["net_pnl_rub"] == 80.0
+    assert payload["long_learning_review"]["active"] is False
+    assert payload["long_learning_review"]["legacy_only"] is True
+
+
 def test_trade_review_breaks_down_regime_policy_and_pending_rebound():
     opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
     trades = [

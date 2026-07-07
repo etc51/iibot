@@ -514,6 +514,131 @@ class PaperAlphaCaptureSection:
 
 
 @dataclass(frozen=True)
+class ShortOnlyEdgeSection:
+    min_expected_net_edge_rub: float = 5.0
+    min_expected_net_edge_per_lot_rub: float = 0.0
+    required_edge_buffer_bps: float = 2.0
+    allow_price_action_edge_in_selloff: bool = True
+    allow_ml_fallback_when_model_missing: bool = True
+
+
+@dataclass(frozen=True)
+class ShortOnlySizingRegimeSection:
+    target_gross_exposure: float = 0.0
+    max_gross_exposure: float = 0.0
+    max_positions: int = 0
+    max_new_shorts_per_cycle: int = 0
+    per_symbol_exposure_target: float = 0.0
+    per_symbol_exposure_max: float = 0.0
+
+
+@dataclass(frozen=True)
+class ShortOnlySizingSection:
+    market_selloff_impulse: ShortOnlySizingRegimeSection = field(
+        default_factory=lambda: ShortOnlySizingRegimeSection(
+            target_gross_exposure=1.00,
+            max_gross_exposure=1.25,
+            max_positions=12,
+            max_new_shorts_per_cycle=12,
+            per_symbol_exposure_target=0.08,
+            per_symbol_exposure_max=0.12,
+        )
+    )
+    clean_downtrend: ShortOnlySizingRegimeSection = field(
+        default_factory=lambda: ShortOnlySizingRegimeSection(
+            target_gross_exposure=0.70,
+            max_gross_exposure=1.25,
+            max_positions=10,
+            max_new_shorts_per_cycle=8,
+            per_symbol_exposure_target=0.06,
+            per_symbol_exposure_max=0.10,
+        )
+    )
+    weak_down_choppy: ShortOnlySizingRegimeSection = field(
+        default_factory=lambda: ShortOnlySizingRegimeSection(
+            target_gross_exposure=0.35,
+            max_gross_exposure=1.25,
+            max_positions=6,
+            max_new_shorts_per_cycle=6,
+            per_symbol_exposure_target=0.04,
+            per_symbol_exposure_max=0.07,
+        )
+    )
+    range_chop: ShortOnlySizingRegimeSection = field(
+        default_factory=lambda: ShortOnlySizingRegimeSection(
+            target_gross_exposure=0.0,
+            max_gross_exposure=0.0,
+            max_positions=0,
+            max_new_shorts_per_cycle=0,
+        )
+    )
+
+
+@dataclass(frozen=True)
+class ShortOnlyMicrostructureSection:
+    hard_max_spread_bps: float = 40.0
+    hard_min_liquidity_cover: float = 0.4
+    hard_min_book_imbalance: float = -0.95
+    soft_spread_bps: float = 20.0
+    soft_liquidity_cover: float = 1.0
+    soft_book_imbalance: float = -0.60
+    soft_multiplier: float = 0.75
+    bad_but_allowed_multiplier: float = 0.50
+
+
+@dataclass(frozen=True)
+class ShortOnlyConfirmationSection:
+    selloff_min_5m_bars: int = 1
+    normal_min_5m_bars: int = 1
+    neutral_5m_multiplier: float = 0.85
+    mild_rebound_multiplier: float = 0.65
+    strong_rebound_action: str = "no_trade"
+    extreme_adverse_action: str = "no_trade"
+
+
+@dataclass(frozen=True)
+class ShortOnlyMlSection:
+    allow_if_expected_net_edge_positive: bool = True
+    negative_edge_action: str = "no_trade"
+    missing_model_action: str = "price_action_fallback"
+    positive_edge_multiplier: float = 1.0
+    weak_positive_edge_multiplier: float = 0.5
+
+
+@dataclass(frozen=True)
+class ShortOnlyExitsSection:
+    use_existing_atr_stop: bool = True
+    use_existing_take_profit: bool = True
+    use_existing_runner: bool = True
+
+
+@dataclass(frozen=True)
+class ShortOnlySection:
+    enabled: bool = False
+    disable_all_longs: bool = True
+    flatten_existing_longs: bool = True
+    no_trade_in_range_chop: bool = True
+    allow_shorts_only_in_regimes: list[str] = field(
+        default_factory=lambda: [
+            "market_selloff_impulse",
+            "clean_downtrend",
+            "weak_down_choppy",
+        ]
+    )
+    allow_mixed_regime_shorts: bool = False
+    pullback_is_addon_not_required: bool = True
+    ml_is_edge_gate_not_blocker: bool = True
+    microstructure_is_size_modifier_not_blocker: bool = True
+    confirmation_is_size_modifier_not_blocker: bool = True
+    edge: ShortOnlyEdgeSection = field(default_factory=ShortOnlyEdgeSection)
+    sizing: ShortOnlySizingSection = field(default_factory=ShortOnlySizingSection)
+    microstructure: ShortOnlyMicrostructureSection = field(default_factory=ShortOnlyMicrostructureSection)
+    confirmation: ShortOnlyConfirmationSection = field(default_factory=ShortOnlyConfirmationSection)
+    ml: ShortOnlyMlSection = field(default_factory=ShortOnlyMlSection)
+    exits: ShortOnlyExitsSection = field(default_factory=ShortOnlyExitsSection)
+
+
+@dataclass(frozen=True)
 class ExecutionSection:
     mode: TradeMode = TradeMode.LOCAL_PAPER
     slippage_bps: float = 5.0
@@ -591,6 +716,7 @@ class AppConfig:
     symbol_health_policy: SymbolHealthPolicySection = field(default_factory=SymbolHealthPolicySection)
     market_selloff_impulse: MarketSelloffImpulseSection = field(default_factory=MarketSelloffImpulseSection)
     paper_alpha_capture: PaperAlphaCaptureSection = field(default_factory=PaperAlphaCaptureSection)
+    short_only: ShortOnlySection = field(default_factory=ShortOnlySection)
 
     def resolve_path(self, value: str) -> Path:
         path = Path(value)
@@ -752,6 +878,109 @@ def _parse_regime_long_policy(
     raw = payload if isinstance(payload, dict) else {}
     long_raw = raw.get("long", {}) if isinstance(raw.get("long"), dict) else {}
     return cls(**{**default.__dict__, **_dataclass_payload(cls, long_raw)})
+
+
+def _parse_short_only_sizing(payload: dict[str, Any] | None) -> ShortOnlySizingSection:
+    default = ShortOnlySizingSection()
+    raw = payload if isinstance(payload, dict) else {}
+    return ShortOnlySizingSection(
+        market_selloff_impulse=ShortOnlySizingRegimeSection(
+            **{
+                **default.market_selloff_impulse.__dict__,
+                **_dataclass_payload(
+                    ShortOnlySizingRegimeSection,
+                    raw.get("market_selloff_impulse", {})
+                    if isinstance(raw.get("market_selloff_impulse"), dict)
+                    else {},
+                ),
+            }
+        ),
+        clean_downtrend=ShortOnlySizingRegimeSection(
+            **{
+                **default.clean_downtrend.__dict__,
+                **_dataclass_payload(
+                    ShortOnlySizingRegimeSection,
+                    raw.get("clean_downtrend", {}) if isinstance(raw.get("clean_downtrend"), dict) else {},
+                ),
+            }
+        ),
+        weak_down_choppy=ShortOnlySizingRegimeSection(
+            **{
+                **default.weak_down_choppy.__dict__,
+                **_dataclass_payload(
+                    ShortOnlySizingRegimeSection,
+                    raw.get("weak_down_choppy", {}) if isinstance(raw.get("weak_down_choppy"), dict) else {},
+                ),
+            }
+        ),
+        range_chop=ShortOnlySizingRegimeSection(
+            **{
+                **default.range_chop.__dict__,
+                **_dataclass_payload(
+                    ShortOnlySizingRegimeSection,
+                    raw.get("range_chop", {}) if isinstance(raw.get("range_chop"), dict) else {},
+                ),
+            }
+        ),
+    )
+
+
+def _parse_short_only(payload: dict[str, Any] | None, *, execution_mode: TradeMode) -> ShortOnlySection:
+    default = ShortOnlySection()
+    raw = payload if isinstance(payload, dict) else {}
+    values = {
+        **default.__dict__,
+        **_dataclass_payload(ShortOnlySection, raw),
+    }
+    values["edge"] = ShortOnlyEdgeSection(
+        **{
+            **default.edge.__dict__,
+            **_dataclass_payload(
+                ShortOnlyEdgeSection,
+                raw.get("edge", {}) if isinstance(raw.get("edge"), dict) else {},
+            ),
+        }
+    )
+    values["sizing"] = _parse_short_only_sizing(raw.get("sizing", {}) if isinstance(raw.get("sizing"), dict) else {})
+    values["microstructure"] = ShortOnlyMicrostructureSection(
+        **{
+            **default.microstructure.__dict__,
+            **_dataclass_payload(
+                ShortOnlyMicrostructureSection,
+                raw.get("microstructure", {}) if isinstance(raw.get("microstructure"), dict) else {},
+            ),
+        }
+    )
+    values["confirmation"] = ShortOnlyConfirmationSection(
+        **{
+            **default.confirmation.__dict__,
+            **_dataclass_payload(
+                ShortOnlyConfirmationSection,
+                raw.get("confirmation", {}) if isinstance(raw.get("confirmation"), dict) else {},
+            ),
+        }
+    )
+    values["ml"] = ShortOnlyMlSection(
+        **{
+            **default.ml.__dict__,
+            **_dataclass_payload(
+                ShortOnlyMlSection,
+                raw.get("ml", {}) if isinstance(raw.get("ml"), dict) else {},
+            ),
+        }
+    )
+    values["exits"] = ShortOnlyExitsSection(
+        **{
+            **default.exits.__dict__,
+            **_dataclass_payload(
+                ShortOnlyExitsSection,
+                raw.get("exits", {}) if isinstance(raw.get("exits"), dict) else {},
+            ),
+        }
+    )
+    if execution_mode != TradeMode.LOCAL_PAPER:
+        values["enabled"] = False
+    return ShortOnlySection(**values)
 
 
 def load_config(config_path: str | Path) -> AppConfig:
@@ -995,6 +1224,7 @@ def load_config(config_path: str | Path) -> AppConfig:
     if execution.mode != TradeMode.LOCAL_PAPER:
         paper_alpha_values["enabled"] = False
     paper_alpha_capture = PaperAlphaCaptureSection(**paper_alpha_values)
+    short_only = _parse_short_only(raw.get("short_only", {}), execution_mode=execution.mode)
 
     backtest = BacktestSection(**raw.get("backtest", {}))
     reporting = ReportingSection(**raw.get("reporting", {}))
@@ -1019,6 +1249,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         symbol_health_policy=symbol_health_policy,
         market_selloff_impulse=market_selloff_impulse,
         paper_alpha_capture=paper_alpha_capture,
+        short_only=short_only,
         execution=execution,
         backtest=backtest,
         reporting=reporting,

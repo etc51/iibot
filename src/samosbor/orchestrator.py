@@ -206,6 +206,805 @@ class TradingOrchestrator:
             and self.config.execution.mode.value == "local-paper"
         )
 
+    def _short_only_enabled(self) -> bool:
+        return (
+            bool(getattr(getattr(self.config, "short_only", None), "enabled", False))
+            and self.config.execution.mode.value == "local-paper"
+        )
+
+    def _run_short_only_cycle(self) -> dict[str, object]:
+        assert_paper_only_mode(
+            self.config.execution.mode,
+            allow_live_trading=self.config.execution.allow_live_trading,
+            live_flag=False,
+        )
+        provider = self._data_provider()
+        instruments = provider.resolve_universe(self.config.data.instruments)
+        history = provider.load_history(instruments)
+        confirmation_history = self._load_entry_confirmation_history(provider, instruments, history)
+        marks = {symbol: candles[-1].close for symbol, candles in history.items() if candles}
+
+        state_path = self.config.resolve_path(self.config.execution.state_path)
+        feedback_path = signal_feedback_path(state_path)
+        broker = self._load_paper_broker()
+        signal_feedback = load_signal_feedback(feedback_path)
+
+        timestamp = datetime.now(timezone.utc)
+        strategy = self._strategy()
+        if hasattr(strategy, "prepare_market_context"):
+            strategy.prepare_market_context(history)
+        for instrument in instruments:
+            strategy.prepare_history(instrument, history.get(instrument.symbol, []))
+        risk_manager = self._risk_manager()
+        cycle_events: list[dict[str, object]] = [
+            {
+                "timestamp": timestamp.isoformat(),
+                "action": "short_only_cycle_start",
+                "short_only_enabled": True,
+                "disable_all_longs": bool(self.config.short_only.disable_all_longs),
+                "allow_live_trading": self.config.execution.allow_live_trading,
+            }
+        ]
+        market_regime = detect_market_regime(history)
+        cycle_events.append(
+            {
+                "timestamp": timestamp.isoformat(),
+                "action": "market_regime",
+                **market_regime.as_event(),
+            }
+        )
+        if market_regime.regime == "market_selloff_impulse":
+            cycle_events.append(self._market_selloff_detected_event(market_regime, timestamp))
+
+        resolve_pending_signals(signal_feedback, history)
+        broker.mark_to_market(marks, timestamp)
+        risk_manager.update_drawdown_state(broker.portfolio, marks)
+        cycle_events.extend(
+            self._short_only_manage_existing_positions(
+                broker,
+                risk_manager,
+                strategy,
+                history,
+                marks,
+                timestamp=timestamp,
+            )
+        )
+
+        mode = self._short_only_mode_for_regime(market_regime.regime)
+        if mode == "NO_TRADE":
+            cycle_events.append(
+                {
+                    "timestamp": timestamp.isoformat(),
+                    "action": (
+                        "range_chop_no_trade_short_only"
+                        if market_regime.regime == "range_chop"
+                        else "short_only_no_trade_regime"
+                    ),
+                    "regime": market_regime.regime,
+                    "reason": "short-only no-trade regime",
+                    "metadata": {"market_regime": market_regime.as_event()},
+                }
+            )
+        else:
+            candidates = self._short_only_collect_candidates(
+                provider,
+                strategy,
+                risk_manager,
+                broker,
+                signal_feedback,
+                instruments,
+                history,
+                confirmation_history,
+                marks,
+                market_regime=market_regime,
+                timestamp=timestamp,
+                cycle_events=cycle_events,
+            )
+            cycle_events.extend(
+                self._short_only_allocate_and_open(
+                    broker,
+                    candidates,
+                    marks,
+                    market_regime=market_regime,
+                    timestamp=timestamp,
+                )
+            )
+
+        broker.mark_to_market(marks, timestamp)
+        broker.events.extend(cycle_events)
+        broker.save(state_path)
+        save_signal_feedback(feedback_path, signal_feedback)
+        trade_review = build_trade_review_payload(
+            broker.portfolio,
+            broker.trades,
+            broker.events,
+            strategy=self.config.strategy,
+            risk=self.config.risk,
+            timezone_name=self.config.app.timezone,
+            lookback_trades=100,
+            generated_at=timestamp,
+            microstructure_dir=self.config.resolve_path(self.config.reporting.output_dir) / "microstructure",
+        )
+        latest_trade_review_path = trade_review_path(state_path)
+        save_trade_review(latest_trade_review_path, trade_review)
+        trade_review["latest_path"] = str(latest_trade_review_path)
+        add_runtime_metadata(trade_review)
+        signal_activity = _summarize_signal_activity(cycle_events)
+        short_only_activity = _summarize_short_only_activity(cycle_events, broker.portfolio, marks)
+        stamp = timestamp.strftime("%Y%m%d-%H%M%S")
+        output_dir = self.config.resolve_path(self.config.reporting.output_dir) / "paper" / stamp
+        trade_review["output_dir"] = str(output_dir)
+        summary = {
+            "timestamp": timestamp.isoformat(),
+            "equity_rub": round(broker.portfolio.equity(marks), 2),
+            "cash_rub": round(broker.portfolio.cash, 2),
+            "gross_exposure_rub": round(broker.portfolio.gross_exposure(marks), 2),
+            "open_positions": len(broker.portfolio.positions),
+            "trading_halted": broker.portfolio.trading_halted,
+            "short_only": short_only_activity,
+            "trade_review": _trade_review_view(trade_review),
+            **signal_activity,
+        }
+        add_runtime_metadata(summary)
+        cycle_events_payload = {"events": cycle_events}
+        add_runtime_metadata(cycle_events_payload)
+        write_json_payload(output_dir / "cycle_summary.json", summary)
+        write_json_payload(output_dir / "cycle_events.json", cycle_events_payload)
+        write_trade_review(output_dir, trade_review)
+        write_portfolio_snapshot(output_dir / "portfolio.json", broker.portfolio)
+        return {"summary": summary, "output_dir": str(output_dir)}
+
+    def _short_only_manage_existing_positions(
+        self,
+        broker,
+        risk_manager: RiskManager,
+        strategy,
+        history: dict[str, list],
+        marks: dict[str, float],
+        *,
+        timestamp: datetime,
+    ) -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        for symbol, position in list(broker.portfolio.positions.items()):
+            candles = history.get(symbol, [])
+            latest = candles[-1] if candles else None
+            mark = marks.get(symbol, position.current_price)
+            event_timestamp = latest.timestamp if latest is not None else timestamp
+            if position.direction == SignalDirection.LONG:
+                if bool(self.config.short_only.flatten_existing_longs):
+                    broker.close_position(
+                        symbol,
+                        price=mark,
+                        timestamp=event_timestamp,
+                        reason=ExitReason.SHORT_ONLY_POLICY_FLATTEN_LONG,
+                    )
+                    events.append(
+                        {
+                            "timestamp": event_timestamp.isoformat(),
+                            "symbol": symbol,
+                            "action": "long_position_flattened_short_only",
+                            "direction": "long",
+                            "reason": "short_only_policy_flatten_long",
+                        }
+                    )
+                continue
+            if latest is None:
+                continue
+            if latest.high >= position.stop_price:
+                broker.close_position(
+                    symbol,
+                    price=position.stop_price,
+                    timestamp=latest.timestamp,
+                    reason=ExitReason.STOP_LOSS,
+                )
+                continue
+            if latest.low <= position.take_profit and not position.runner_active:
+                if self.config.short_only.exits.use_existing_runner and self._take_profit_activates_runner(
+                    broker,
+                    symbol,
+                    position,
+                    latest,
+                ):
+                    position = broker.portfolio.positions.get(symbol)
+                else:
+                    broker.close_position(
+                        symbol,
+                        price=position.take_profit,
+                        timestamp=latest.timestamp,
+                        reason=ExitReason.TAKE_PROFIT,
+                    )
+                    continue
+            if position and position.runner_active and self.config.short_only.exits.use_existing_runner:
+                self._update_runner_extreme(broker, symbol, position, latest)
+                position = broker.portfolio.positions.get(symbol)
+            if position is not None and strategy.should_force_flatten_at(latest.timestamp):
+                broker.close_position(
+                    symbol,
+                    price=latest.close,
+                    timestamp=latest.timestamp,
+                    reason=ExitReason.SESSION_FLAT,
+                )
+                continue
+            if position is not None and self.config.short_only.exits.use_existing_atr_stop:
+                if position.runner_active:
+                    new_stop = risk_manager.runner_trailing_stop_price(
+                        position,
+                        atr_value=atr(candles, self.config.strategy.atr_window),
+                        strategy=self.config.strategy,
+                    )
+                else:
+                    new_stop = risk_manager.trailing_stop_price(
+                        position,
+                        latest.close,
+                        self.config.strategy,
+                    )
+                if new_stop is not None:
+                    broker.update_position_protection(
+                        symbol,
+                        timestamp=latest.timestamp,
+                        stop_price=new_stop,
+                        reason="short-only-trailing-profit-protection",
+                    )
+        return events
+
+    def _short_only_collect_candidates(
+        self,
+        provider,
+        strategy,
+        risk_manager: RiskManager,
+        broker,
+        signal_feedback: dict[str, list[dict[str, object]]],
+        instruments: list,
+        history: dict[str, list],
+        confirmation_history: dict[str, list],
+        marks: dict[str, float],
+        *,
+        market_regime,
+        timestamp: datetime,
+        cycle_events: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        candidates: list[dict[str, object]] = []
+        for instrument in instruments:
+            candles = history.get(instrument.symbol, [])
+            if not candles:
+                continue
+            latest = candles[-1]
+            if instrument.symbol in broker.portfolio.positions:
+                continue
+            signal = strategy.generate_signal(instrument, candles)
+            if signal is None:
+                continue
+            if signal.direction == SignalDirection.LONG:
+                cycle_events.append(
+                    {
+                        "timestamp": latest.timestamp.isoformat(),
+                        "symbol": instrument.symbol,
+                        "action": "long_signal_ignored_short_only",
+                        "direction": "long",
+                        "strength": signal.strength,
+                        "reason": "short_only disables active long trading",
+                    }
+                )
+                continue
+            if signal.direction != SignalDirection.SHORT:
+                continue
+            entry_block_reason = strategy.entry_block_reason_for_instrument(
+                instrument,
+                latest.timestamp,
+                signal.direction,
+            )
+            if entry_block_reason is not None:
+                cycle_events.append(
+                    self._short_only_signal_event(
+                        signal,
+                        market_regime=market_regime,
+                        timestamp=latest.timestamp,
+                        approved=False,
+                        reason=entry_block_reason,
+                        quantity_lots=0,
+                    )
+                )
+                continue
+
+            decision = risk_manager.approve(broker.portfolio, signal, marks, broker.trades)
+            signal_for_entry = self._signal_with_entry_candle_context(signal, candles)
+            signal_for_entry = self._signal_with_entry_confirmation_context(
+                signal_for_entry,
+                confirmation_history.get(instrument.symbol, []),
+                signal_timestamp=latest.timestamp,
+            )
+            signal_for_entry = self._signal_with_setup_learning_tags(
+                signal_for_entry,
+                broker.trades,
+                timestamp=latest.timestamp,
+            )
+            quantity_lots = max(0, int(decision.quantity_lots))
+            if decision.approved:
+                signal_for_entry = self._signal_with_entry_microstructure(
+                    provider,
+                    signal_for_entry,
+                    quantity_lots=quantity_lots,
+                )
+                signal_for_entry = self._signal_with_learning_assessment(
+                    signal_for_entry,
+                    signal_feedback,
+                    timestamp=latest.timestamp,
+                    quantity_lots=quantity_lots,
+                )
+            edge = self._short_only_edge_gate(
+                signal_for_entry,
+                market_regime=market_regime,
+                quantity_lots=quantity_lots,
+            )
+            micro = self._short_only_microstructure_gate(signal_for_entry)
+            confirmation = self._short_only_confirmation_gate(signal_for_entry, market_regime=market_regime)
+            hard_reasons = []
+            if not decision.approved:
+                hard_reasons.append(decision.reason)
+            if not edge["passed"]:
+                hard_reasons.append(str(edge["reason"]))
+            if micro["hard_reason"]:
+                hard_reasons.append(str(micro["hard_reason"]))
+            if confirmation["hard_reason"]:
+                hard_reasons.append(str(confirmation["hard_reason"]))
+            metadata = dict(signal_for_entry.metadata)
+            multiplier = _bounded_multiplier(
+                float(edge["multiplier"]) * float(micro["multiplier"]) * float(confirmation["multiplier"])
+            )
+            metadata["market_regime"] = market_regime.as_event()
+            metadata["short_only"] = {
+                "enabled": True,
+                "mode": self._short_only_mode_for_regime(market_regime.regime),
+                "expected_net_edge_rub": edge["expected_net_edge_rub"],
+                "required_net_edge_rub": edge["required_net_edge_rub"],
+                "edge_source": edge["source"],
+                "edge_gate_passed": edge["passed"],
+                "edge_gate_reason": edge["reason"],
+                "edge_bucket": edge["edge_bucket"],
+                "microstructure_multiplier": micro["multiplier"],
+                "confirmation_multiplier": confirmation["multiplier"],
+                "size_multiplier": multiplier,
+                "hard_reasons": list(hard_reasons),
+            }
+            signal_for_entry = replace(signal_for_entry, metadata=metadata)
+            cycle_events.append(
+                {
+                    "timestamp": latest.timestamp.isoformat(),
+                    "symbol": instrument.symbol,
+                    "action": "short_only_short_candidate",
+                    "regime": market_regime.regime,
+                    "direction": "short",
+                    "strength": signal.strength,
+                    "expected_net_edge_rub": edge["expected_net_edge_rub"],
+                    "required_net_edge_rub": edge["required_net_edge_rub"],
+                    "edge_source": edge["source"],
+                    "edge_gate_passed": edge["passed"],
+                    "edge_gate_reason": edge["reason"],
+                    "hard_reasons": list(hard_reasons),
+                    "metadata": {"short_only": metadata["short_only"]},
+                }
+            )
+            if hard_reasons:
+                cycle_events.append(
+                    self._short_only_signal_event(
+                        signal_for_entry,
+                        market_regime=market_regime,
+                        timestamp=latest.timestamp,
+                        approved=False,
+                        reason="; ".join(hard_reasons),
+                        quantity_lots=0,
+                        original_quantity_lots=quantity_lots,
+                    )
+                )
+                continue
+            candidates.append(
+                {
+                    "signal": signal_for_entry,
+                    "timestamp": latest.timestamp,
+                    "risk_quantity_lots": quantity_lots,
+                    "size_multiplier": multiplier,
+                    "expected_net_edge_rub": float(edge["expected_net_edge_rub"]),
+                    "required_net_edge_rub": float(edge["required_net_edge_rub"]),
+                    "edge_source": str(edge["source"]),
+                }
+            )
+        candidates.sort(
+            key=lambda item: (
+                float(item["expected_net_edge_rub"]),
+                float(item["signal"].strength),
+            ),
+            reverse=True,
+        )
+        return candidates
+
+    def _short_only_allocate_and_open(
+        self,
+        broker,
+        candidates: list[dict[str, object]],
+        marks: dict[str, float],
+        *,
+        market_regime,
+        timestamp: datetime,
+    ) -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        sizing = self._short_only_sizing_for_regime(market_regime.regime)
+        equity = broker.portfolio.equity(marks)
+        target_gross = max(0.0, equity * float(getattr(sizing, "target_gross_exposure", 0.0)))
+        regime_max_gross = float(getattr(sizing, "max_gross_exposure", 0.0) or self.config.risk.max_gross_exposure)
+        max_gross = equity * min(float(self.config.risk.max_gross_exposure), regime_max_gross)
+        max_positions = min(
+            int(self.config.risk.max_positions),
+            int(getattr(sizing, "max_positions", 0) or self.config.risk.max_positions),
+        )
+        max_new = int(getattr(sizing, "max_new_shorts_per_cycle", 0) or len(candidates))
+        opened = 0
+        blocked: Counter[str] = Counter()
+        for candidate in candidates:
+            signal = candidate["signal"]
+            if opened >= max_new:
+                blocked["max_new_shorts_per_cycle"] += 1
+                events.append(
+                    self._short_only_signal_event(
+                        signal,
+                        market_regime=market_regime,
+                        timestamp=candidate["timestamp"],
+                        approved=False,
+                        reason="short_only max new shorts per cycle reached",
+                        quantity_lots=0,
+                        original_quantity_lots=int(candidate["risk_quantity_lots"]),
+                    )
+                )
+                continue
+            if len(broker.portfolio.positions) >= max_positions:
+                blocked["max_positions"] += 1
+                events.append(
+                    self._short_only_signal_event(
+                        signal,
+                        market_regime=market_regime,
+                        timestamp=candidate["timestamp"],
+                        approved=False,
+                        reason="short_only max positions reached",
+                        quantity_lots=0,
+                        original_quantity_lots=int(candidate["risk_quantity_lots"]),
+                    )
+                )
+                continue
+            current_gross = broker.portfolio.gross_exposure(marks)
+            if target_gross > 0 and current_gross >= target_gross:
+                blocked["target_gross_exposure_reached"] += 1
+                events.append(
+                    self._short_only_signal_event(
+                        signal,
+                        market_regime=market_regime,
+                        timestamp=candidate["timestamp"],
+                        approved=False,
+                        reason="short_only target gross exposure reached",
+                        quantity_lots=0,
+                        original_quantity_lots=int(candidate["risk_quantity_lots"]),
+                    )
+                )
+                continue
+            if current_gross >= max_gross:
+                blocked["max_gross_exposure"] += 1
+                events.append(
+                    self._short_only_signal_event(
+                        signal,
+                        market_regime=market_regime,
+                        timestamp=candidate["timestamp"],
+                        approved=False,
+                        reason="short_only max gross exposure reached",
+                        quantity_lots=0,
+                        original_quantity_lots=int(candidate["risk_quantity_lots"]),
+                    )
+                )
+                continue
+            quantity_lots = self._short_only_allocated_quantity(
+                candidate,
+                equity=equity,
+                current_gross=current_gross,
+                target_gross=target_gross,
+                max_gross=max_gross,
+                sizing=sizing,
+            )
+            if quantity_lots < 1:
+                blocked["lot sizing failed"] += 1
+                events.append(
+                    self._short_only_signal_event(
+                        signal,
+                        market_regime=market_regime,
+                        timestamp=candidate["timestamp"],
+                        approved=False,
+                        reason="short_only allocation produced < 1 lot",
+                        quantity_lots=0,
+                        original_quantity_lots=int(candidate["risk_quantity_lots"]),
+                    )
+                )
+                continue
+            metadata = dict(signal.metadata)
+            short_only = dict(metadata.get("short_only", {}))
+            short_only["allocated_quantity_lots"] = quantity_lots
+            short_only["budget_target_gross_rub"] = round(target_gross, 2)
+            short_only["budget_current_gross_rub"] = round(current_gross, 2)
+            metadata["short_only"] = short_only
+            signal = replace(signal, metadata=metadata)
+            events.append(
+                self._short_only_signal_event(
+                    signal,
+                    market_regime=market_regime,
+                    timestamp=candidate["timestamp"],
+                    approved=True,
+                    reason="approved",
+                    quantity_lots=quantity_lots,
+                    original_quantity_lots=int(candidate["risk_quantity_lots"]),
+                )
+            )
+            broker.open_position(signal, quantity_lots, candidate["timestamp"])
+            opened += 1
+
+        final_gross = broker.portfolio.gross_exposure(marks)
+        budget_used = final_gross / target_gross if target_gross > 0 else 0.0
+        diagnostics = {
+            "regime": market_regime.regime,
+            "target_gross_exposure": round(float(getattr(sizing, "target_gross_exposure", 0.0)), 6),
+            "budget_target_gross_rub": round(target_gross, 2),
+            "budget_used_gross_rub": round(final_gross, 2),
+            "budget_used_pct": round(budget_used, 6),
+            "positive_ev_candidates": len(candidates),
+            "shorts_opened": opened,
+            "blocked_reasons": dict(sorted(blocked.items())),
+        }
+        events.append(
+            {
+                "timestamp": timestamp.isoformat(),
+                "action": "short_only_budget_allocation",
+                **diagnostics,
+                "metadata": {"short_only_budget": diagnostics},
+            }
+        )
+        if candidates and target_gross > 0 and final_gross < target_gross * 0.50:
+            events.append(
+                {
+                    "timestamp": timestamp.isoformat(),
+                    "action": "short_only_underallocated",
+                    "severity": "warning",
+                    **diagnostics,
+                    "reason": "gross exposure after allocation below 50% of target",
+                    "metadata": {"short_only_budget": diagnostics},
+                }
+            )
+        return events
+
+    def _short_only_allocated_quantity(
+        self,
+        candidate: dict[str, object],
+        *,
+        equity: float,
+        current_gross: float,
+        target_gross: float,
+        max_gross: float,
+        sizing,
+    ) -> int:
+        signal = candidate["signal"]
+        notional_per_lot = signal.entry_price * signal.instrument.lot_size
+        if notional_per_lot <= 0:
+            return 0
+        risk_quantity = self._quantity_after_multiplier(
+            int(candidate["risk_quantity_lots"]),
+            float(candidate["size_multiplier"]),
+        )
+        if risk_quantity < 1:
+            return 0
+        per_symbol_target = equity * float(getattr(sizing, "per_symbol_exposure_target", 0.0) or 1.0)
+        per_symbol_max = equity * float(getattr(sizing, "per_symbol_exposure_max", 0.0) or 1.0)
+        remaining_target = max(0.0, target_gross - current_gross) if target_gross > 0 else max_gross - current_gross
+        remaining_global = max(0.0, max_gross - current_gross)
+        budget = max(0.0, min(per_symbol_max, per_symbol_target, remaining_target, remaining_global))
+        budget_lots = int(budget // notional_per_lot)
+        return max(0, min(risk_quantity, budget_lots))
+
+    def _short_only_edge_gate(
+        self,
+        signal,
+        *,
+        market_regime,
+        quantity_lots: int,
+    ) -> dict[str, object]:
+        cfg = self.config.short_only
+        edge_cfg = cfg.edge
+        ml = signal.metadata.get("ml_learning", {})
+        expected: float | None = None
+        required_ml = 0.0
+        source = "none"
+        multiplier = 1.0
+        reason = ""
+        if isinstance(ml, dict) and bool(ml.get("available", False)):
+            expected = self._object_float(ml.get("expected_pnl_position_rub"))
+            required_ml = self._object_float(ml.get("required_net_edge_rub")) or 0.0
+            source = "ml"
+        elif (
+            str(getattr(cfg.ml, "missing_model_action", "")) == "price_action_fallback"
+            and bool(edge_cfg.allow_ml_fallback_when_model_missing)
+            and self._price_action_fallback_allowed(signal, market_regime)
+        ):
+            expected = self._price_action_expected_edge(signal, quantity_lots)
+            source = "price_action_fallback"
+        buffer_rub = signal.entry_price * signal.instrument.lot_size * max(1, int(quantity_lots)) * (
+            float(edge_cfg.required_edge_buffer_bps) / 10000.0
+        )
+        required = max(float(edge_cfg.min_expected_net_edge_rub), required_ml + buffer_rub)
+        if expected is None:
+            return {
+                "passed": False,
+                "expected_net_edge_rub": 0.0,
+                "required_net_edge_rub": round(required, 2),
+                "source": source,
+                "multiplier": 0.0,
+                "edge_bucket": "missing",
+                "reason": "edge model missing and price action fallback not allowed",
+            }
+        expected_per_lot = expected / max(1, int(quantity_lots))
+        passed = expected > required and expected_per_lot >= float(edge_cfg.min_expected_net_edge_per_lot_rub)
+        if not passed:
+            multiplier = 0.0
+            reason = "expected net edge is not positive after required buffer"
+        elif expected < required * 2:
+            multiplier = float(cfg.ml.weak_positive_edge_multiplier)
+            reason = "weak positive edge"
+        else:
+            multiplier = float(cfg.ml.positive_edge_multiplier)
+            reason = "positive edge"
+        return {
+            "passed": passed,
+            "expected_net_edge_rub": round(expected, 2),
+            "required_net_edge_rub": round(required, 2),
+            "source": source,
+            "multiplier": _bounded_multiplier(multiplier),
+            "edge_bucket": self._short_only_edge_bucket(expected - required),
+            "reason": reason,
+        }
+
+    def _price_action_fallback_allowed(self, signal, market_regime) -> bool:
+        if market_regime.regime not in {"market_selloff_impulse", "clean_downtrend"}:
+            return False
+        if market_regime.regime == "market_selloff_impulse" and not self.config.short_only.edge.allow_price_action_edge_in_selloff:
+            return False
+        candle = signal.metadata.get("entry_candle", {})
+        if not isinstance(candle, dict):
+            candle = {}
+        ret1 = self._object_float(candle.get("ret1")) or 0.0
+        ret4 = self._object_float(candle.get("ret4")) or 0.0
+        return signal.direction == SignalDirection.SHORT and (ret1 < 0.0 or ret4 < 0.0 or signal.strength >= 0.30)
+
+    def _price_action_expected_edge(self, signal, quantity_lots: int) -> float:
+        quantity_units = max(1, int(quantity_lots)) * signal.instrument.lot_size
+        planned_risk = abs(signal.stop_price - signal.entry_price) * quantity_units
+        planned_reward = abs(signal.entry_price - signal.take_profit) * quantity_units
+        win_probability = max(0.05, min(0.95, float(signal.strength)))
+        return planned_reward * win_probability - planned_risk * (1.0 - win_probability)
+
+    def _short_only_microstructure_gate(self, signal) -> dict[str, object]:
+        cfg = self.config.short_only.microstructure
+        micro = signal.metadata.get("microstructure", {})
+        if not isinstance(micro, dict) or not micro.get("available", False):
+            return {"multiplier": 1.0, "hard_reason": "", "soft_reasons": ["microstructure-unavailable"]}
+        spread = self._object_float(micro.get("spread_bps"))
+        cover = self._object_float(micro.get("entry_liquidity_cover"))
+        imbalance = self._object_float(micro.get("side_imbalance", micro.get("imbalance")))
+        hard_reasons: list[str] = []
+        soft_reasons: list[str] = []
+        if spread is not None:
+            if spread > float(cfg.hard_max_spread_bps):
+                hard_reasons.append("short_only extreme spread")
+            elif spread > float(cfg.soft_spread_bps):
+                soft_reasons.append("short_only soft spread")
+        if cover is not None:
+            if cover < float(cfg.hard_min_liquidity_cover):
+                hard_reasons.append("short_only extreme liquidity")
+            elif cover < float(cfg.soft_liquidity_cover):
+                soft_reasons.append("short_only soft liquidity")
+        if imbalance is not None:
+            if imbalance < float(cfg.hard_min_book_imbalance):
+                hard_reasons.append("short_only extreme imbalance")
+            elif imbalance < float(cfg.soft_book_imbalance):
+                soft_reasons.append("short_only soft imbalance")
+        multiplier = 1.0
+        if soft_reasons:
+            multiplier = float(cfg.bad_but_allowed_multiplier if len(soft_reasons) > 1 else cfg.soft_multiplier)
+        return {
+            "multiplier": _bounded_multiplier(multiplier),
+            "hard_reason": "; ".join(hard_reasons),
+            "soft_reasons": soft_reasons,
+        }
+
+    def _short_only_confirmation_gate(self, signal, *, market_regime) -> dict[str, object]:
+        cfg = self.config.short_only.confirmation
+        confirmation = signal.metadata.get("entry_confirmation", {})
+        if not isinstance(confirmation, dict) or not confirmation.get("available", False):
+            return {"multiplier": 1.0, "hard_reason": "", "status": "unavailable"}
+        bars = int(confirmation.get("bars", 0) or 0)
+        min_bars = int(cfg.selloff_min_5m_bars if market_regime.regime == "market_selloff_impulse" else cfg.normal_min_5m_bars)
+        if bars < min_bars:
+            return {"multiplier": float(cfg.neutral_5m_multiplier), "hard_reason": "", "status": "insufficient_bars"}
+        ret_window = self._object_float(confirmation.get("ret_window")) or 0.0
+        adverse_ret = max(0.0, ret_window)
+        mild = float(getattr(self.config.confirmation_5m, "mild_adverse_ret", 0.0025))
+        strong = float(getattr(self.config.confirmation_5m, "strong_adverse_ret", 0.005))
+        extreme = float(getattr(self.config.confirmation_5m, "extreme_adverse_ret", 0.012))
+        if adverse_ret <= 0.0:
+            return {"multiplier": 1.0, "hard_reason": "", "status": "aligned"}
+        if adverse_ret < mild:
+            return {"multiplier": float(cfg.neutral_5m_multiplier), "hard_reason": "", "status": "neutral"}
+        if adverse_ret < strong:
+            return {"multiplier": float(cfg.mild_rebound_multiplier), "hard_reason": "", "status": "mild_rebound"}
+        if adverse_ret < extreme:
+            hard = "short_only strong rebound against short" if cfg.strong_rebound_action == "no_trade" else ""
+            return {"multiplier": 0.0 if hard else float(cfg.mild_rebound_multiplier), "hard_reason": hard, "status": "strong_rebound"}
+        hard = "short_only extreme adverse confirmation" if cfg.extreme_adverse_action == "no_trade" else ""
+        return {"multiplier": 0.0 if hard else float(cfg.mild_rebound_multiplier), "hard_reason": hard, "status": "extreme_adverse"}
+
+    def _short_only_mode_for_regime(self, regime: str) -> str:
+        allowed = set(self.config.short_only.allow_shorts_only_in_regimes)
+        if regime not in allowed:
+            if regime == "mixed" and bool(self.config.short_only.allow_mixed_regime_shorts):
+                return "SHORT_SELECTIVE"
+            return "NO_TRADE"
+        if regime == "market_selloff_impulse":
+            return "SHORT_AGGRESSIVE"
+        if regime == "clean_downtrend":
+            return "SHORT_AGGRESSIVE"
+        if regime == "weak_down_choppy":
+            return "SHORT_SELECTIVE"
+        return "NO_TRADE"
+
+    def _short_only_sizing_for_regime(self, regime: str):
+        sizing = self.config.short_only.sizing
+        return getattr(sizing, regime, sizing.range_chop)
+
+    def _short_only_signal_event(
+        self,
+        signal,
+        *,
+        market_regime,
+        timestamp: datetime,
+        approved: bool,
+        reason: str,
+        quantity_lots: int,
+        original_quantity_lots: int = 0,
+    ) -> dict[str, object]:
+        metadata = dict(signal.metadata)
+        metadata.setdefault("market_regime", market_regime.as_event())
+        metadata.setdefault("short_only", {"enabled": True})
+        return {
+            "timestamp": timestamp.isoformat(),
+            "symbol": signal.instrument.symbol,
+            "action": "signal",
+            "event_type": "short_only_policy_decision",
+            "approved": approved,
+            "reason": reason,
+            "direction": signal.direction.value,
+            "strength": signal.strength,
+            "quantity_lots": int(quantity_lots),
+            "original_quantity_lots": int(original_quantity_lots or quantity_lots),
+            "metadata": metadata,
+        }
+
+    @staticmethod
+    def _short_only_edge_bucket(edge_after_required: float) -> str:
+        if edge_after_required <= 0:
+            return "non_positive"
+        if edge_after_required < 50:
+            return "small_positive"
+        if edge_after_required < 250:
+            return "medium_positive"
+        return "large_positive"
+
+    @staticmethod
+    def _object_float(value: object) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     def _load_paper_broker(self) -> LocalPaperBroker:
         state_path = self.config.resolve_path(self.config.execution.state_path)
         return LocalPaperBroker.load(
@@ -1044,6 +1843,8 @@ class TradingOrchestrator:
             allow_live_trading=self.config.execution.allow_live_trading,
             live_flag=False,
         )
+        if self._short_only_enabled():
+            return self._run_short_only_cycle()
         provider = self._data_provider()
         instruments = provider.resolve_universe(self.config.data.instruments)
         history = provider.load_history(instruments)
@@ -3018,6 +3819,7 @@ def _trade_review_view(payload: dict[str, object]) -> dict[str, object]:
         },
         "mistake_breakdown": payload.get("mistake_breakdown", {}),
         "config_patch_candidates": payload.get("config_patch_candidates", {}),
+        "short_only_review": payload.get("short_only_review", {}),
         "recommendations": payload.get("recommendations", []),
     }
 
@@ -3037,6 +3839,48 @@ def _summarize_signal_activity(events: list[dict[str, object]]) -> dict[str, obj
         "signals_rejected": len(rejected_signals),
         "signal_rejection_reason_breakdown": dict(sorted(rejection_reasons.items())),
     }
+
+
+def _summarize_short_only_activity(
+    events: list[dict[str, object]],
+    portfolio,
+    marks: dict[str, float],
+) -> dict[str, object]:
+    candidate_events = [event for event in events if event.get("action") == "short_only_short_candidate"]
+    signal_events = [
+        event
+        for event in events
+        if event.get("action") == "signal"
+        and _event_is_short_only_signal(event)
+    ]
+    approved = [event for event in signal_events if bool(event.get("approved", False))]
+    underallocated = [event for event in events if event.get("action") == "short_only_underallocated"]
+    equity = portfolio.equity(marks)
+    gross = portfolio.gross_exposure(marks)
+    return {
+        "enabled": any(event.get("action") == "short_only_cycle_start" for event in events),
+        "long_signals_ignored": sum(1 for event in events if event.get("action") == "long_signal_ignored_short_only"),
+        "longs_flattened": sum(1 for event in events if event.get("action") == "long_position_flattened_short_only"),
+        "no_trade_range_chop_count": sum(1 for event in events if event.get("action") == "range_chop_no_trade_short_only"),
+        "short_candidates_total": len(candidate_events),
+        "positive_ev_short_candidates": sum(1 for event in candidate_events if bool(event.get("edge_gate_passed", False))),
+        "shorts_opened": len(approved),
+        "shorts_blocked_hard": len(signal_events) - len(approved),
+        "gross_exposure_pct": round(gross / equity, 6) if equity > 0 else 0.0,
+        "underallocated_count": len(underallocated),
+    }
+
+
+def _event_is_short_only_signal(event: dict[str, object]) -> bool:
+    metadata = event.get("metadata", {})
+    if not isinstance(metadata, dict):
+        return False
+    short_only = metadata.get("short_only", {})
+    return isinstance(short_only, dict) and bool(short_only.get("enabled", False))
+
+
+def _bounded_multiplier(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
 
 
 def _entry_schedule_view(payload: dict[str, object]) -> dict[str, object]:

@@ -68,6 +68,50 @@ def _write_basic_paper_config(
     return config_path
 
 
+def _enable_short_only_config(config_path: Path) -> None:
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + "\n".join(
+            [
+                "[short_only]",
+                "enabled = true",
+                "disable_all_longs = true",
+                "flatten_existing_longs = true",
+                "no_trade_in_range_chop = true",
+                "",
+                "[short_only.edge]",
+                "min_expected_net_edge_rub = 5.0",
+                "",
+                "[short_only.sizing.market_selloff_impulse]",
+                "target_gross_exposure = 1.0",
+                "max_gross_exposure = 1.25",
+                "max_positions = 12",
+                "max_new_shorts_per_cycle = 12",
+                "per_symbol_exposure_target = 0.08",
+                "per_symbol_exposure_max = 0.12",
+                "",
+                "[short_only.sizing.clean_downtrend]",
+                "target_gross_exposure = 0.70",
+                "max_gross_exposure = 1.25",
+                "max_positions = 10",
+                "max_new_shorts_per_cycle = 8",
+                "per_symbol_exposure_target = 0.06",
+                "per_symbol_exposure_max = 0.10",
+                "",
+                "[short_only.sizing.weak_down_choppy]",
+                "target_gross_exposure = 0.35",
+                "max_gross_exposure = 1.25",
+                "max_positions = 6",
+                "max_new_shorts_per_cycle = 6",
+                "per_symbol_exposure_target = 0.04",
+                "per_symbol_exposure_max = 0.07",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 class _FakeProvider:
     def __init__(
         self,
@@ -216,6 +260,41 @@ class _PlainShortCycleOrchestrator(_PaperCycleOrchestrator):
         return _PlainShortSignalStrategy()
 
 
+class _PositiveMlShortCycleOrchestrator(_PlainShortCycleOrchestrator):
+    def _signal_with_learning_assessment(self, signal, feedback_payload, *, timestamp, quantity_lots):
+        metadata = dict(signal.metadata)
+        metadata["ml_learning"] = {
+            "available": True,
+            "blocks_entry": False,
+            "action": "allow_entry",
+            "expected_pnl_position_rub": 250.0,
+            "expected_pnl_per_lot_rub": 25.0,
+            "required_net_edge_rub": 5.0,
+            "probability_profit": 0.62,
+        }
+        return replace(signal, metadata=metadata)
+
+
+class _NegativeMlShortCycleOrchestrator(_PlainShortCycleOrchestrator):
+    def _signal_with_learning_assessment(self, signal, feedback_payload, *, timestamp, quantity_lots):
+        metadata = dict(signal.metadata)
+        metadata["ml_learning"] = {
+            "available": True,
+            "blocks_entry": True,
+            "action": "block_entry",
+            "expected_pnl_position_rub": -20.0,
+            "expected_pnl_per_lot_rub": -2.0,
+            "required_net_edge_rub": 5.0,
+            "probability_profit": 0.35,
+        }
+        return replace(signal, metadata=metadata)
+
+
+class _ShortOnlyGuardCycleOrchestrator(_PositiveMlShortCycleOrchestrator):
+    def _signal_with_runtime_policy(self, signal, quantity_lots, *, market_regime, symbol_health, entry_mode):
+        raise AssertionError("short-only path must not call universal runtime policy")
+
+
 class _NoSignalStrategy:
     def prepare_history(self, instrument, candles):
         return None
@@ -267,6 +346,241 @@ class _NoSignalPaperCycleOrchestrator(_PaperCycleOrchestrator):
 
     def _adaptation_strategy(self):
         return _NoSignalStrategy()
+
+
+class PaperCycleShortOnlyTest(unittest.TestCase):
+    def test_short_only_ignores_long_signals_and_never_opens_long(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            _enable_short_only_config(config_path)
+            config = load_config(config_path)
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            candle = Candle(
+                timestamp=datetime(2026, 7, 7, 11, 0, tzinfo=timezone.utc),
+                open=100.0,
+                high=101.0,
+                low=99.5,
+                close=100.5,
+                volume=5_000_000,
+            )
+            orchestrator = _EntrySignalCycleOrchestrator(config, _FakeProvider([instrument], {"SBER": [candle]}))
+            regime = MarketRegime("clean_downtrend", 0.8, {"breadth_down": 1.0})
+
+            with patch("samosbor.orchestrator.detect_market_regime", return_value=regime):
+                result = orchestrator.run_paper_cycle()
+
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+            state = LocalPaperBroker.load(
+                config.resolve_path(config.execution.state_path),
+                initial_cash=config.backtest.initial_cash,
+                slippage_bps=config.execution.slippage_bps,
+                commission_bps=config.execution.commission_bps,
+            )
+
+            self.assertIn("long_signal_ignored_short_only", [event["action"] for event in cycle_events])
+            self.assertEqual(state.portfolio.positions, {})
+
+    def test_short_only_flattens_existing_longs(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            _enable_short_only_config(config_path)
+            config = load_config(config_path)
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            state_path = config.resolve_path(config.execution.state_path)
+            broker = LocalPaperBroker.load(
+                state_path,
+                initial_cash=config.backtest.initial_cash,
+                slippage_bps=config.execution.slippage_bps,
+                commission_bps=config.execution.commission_bps,
+            )
+            opened_at = datetime(2026, 7, 7, 10, 0, tzinfo=timezone.utc)
+            broker.open_position(
+                Signal(
+                    instrument=instrument,
+                    direction=SignalDirection.LONG,
+                    strength=0.8,
+                    entry_price=100.0,
+                    stop_price=99.0,
+                    take_profit=102.0,
+                    reason="test-long",
+                ),
+                5,
+                opened_at,
+            )
+            broker.save(state_path)
+            candle = Candle(
+                timestamp=datetime(2026, 7, 7, 11, 0, tzinfo=timezone.utc),
+                open=100.0,
+                high=101.0,
+                low=99.5,
+                close=100.5,
+                volume=5_000_000,
+            )
+            orchestrator = _NoSignalPaperCycleOrchestrator(config, _FakeProvider([instrument], {"SBER": [candle]}))
+            regime = MarketRegime("clean_downtrend", 0.8, {"breadth_down": 1.0})
+
+            with patch("samosbor.orchestrator.detect_market_regime", return_value=regime):
+                result = orchestrator.run_paper_cycle()
+
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+            state = LocalPaperBroker.load(
+                state_path,
+                initial_cash=config.backtest.initial_cash,
+                slippage_bps=config.execution.slippage_bps,
+                commission_bps=config.execution.commission_bps,
+            )
+
+            self.assertIn("long_position_flattened_short_only", [event["action"] for event in cycle_events])
+            self.assertEqual(state.portfolio.positions, {})
+            self.assertEqual(state.trades[-1].reason, "short_only_policy_flatten_long")
+
+    def test_short_only_no_trade_in_range_chop(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            _enable_short_only_config(config_path)
+            config = load_config(config_path)
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            candle = Candle(
+                timestamp=datetime(2026, 7, 7, 11, 0, tzinfo=timezone.utc),
+                open=100.5,
+                high=101.0,
+                low=99.5,
+                close=100.0,
+                volume=5_000_000,
+            )
+            orchestrator = _PositiveMlShortCycleOrchestrator(config, _FakeProvider([instrument], {"SBER": [candle]}))
+            regime = MarketRegime("range_chop", 0.8, {"chop_score": 0.9})
+
+            with patch("samosbor.orchestrator.detect_market_regime", return_value=regime):
+                result = orchestrator.run_paper_cycle()
+
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+            self.assertIn("range_chop_no_trade_short_only", [event["action"] for event in cycle_events])
+            self.assertFalse(any(event.get("action") == "signal" and event.get("approved") for event in cycle_events))
+
+    def test_short_only_respects_allowed_regime_list(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            _enable_short_only_config(config_path)
+            config = load_config(config_path)
+            config = replace(
+                config,
+                short_only=replace(
+                    config.short_only,
+                    allow_shorts_only_in_regimes=["clean_downtrend"],
+                ),
+            )
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            candle = Candle(
+                timestamp=datetime(2026, 7, 7, 11, 0, tzinfo=timezone.utc),
+                open=100.5,
+                high=101.0,
+                low=99.5,
+                close=100.0,
+                volume=5_000_000,
+            )
+            orchestrator = _PositiveMlShortCycleOrchestrator(config, _FakeProvider([instrument], {"SBER": [candle]}))
+            regime = MarketRegime("weak_down_choppy", 0.8, {"breadth_down": 0.7})
+
+            with patch("samosbor.orchestrator.detect_market_regime", return_value=regime):
+                result = orchestrator.run_paper_cycle()
+
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+
+            self.assertIn("short_only_no_trade_regime", [event["action"] for event in cycle_events])
+            self.assertFalse(any(event.get("action") == "signal" and event.get("approved") for event in cycle_events))
+
+    def test_short_only_positive_ev_short_not_blocked_by_wait_pullback(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            _enable_short_only_config(config_path)
+            config = load_config(config_path)
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            candle = Candle(
+                timestamp=datetime(2026, 7, 7, 11, 0, tzinfo=timezone.utc),
+                open=100.5,
+                high=101.0,
+                low=99.5,
+                close=100.0,
+                volume=5_000_000,
+            )
+            confirmation = [
+                Candle(
+                    timestamp=datetime(2026, 7, 7, 10, 55, tzinfo=timezone.utc),
+                    open=100.0,
+                    high=100.8,
+                    low=99.9,
+                    close=100.3,
+                    volume=1_000_000,
+                ),
+                Candle(
+                    timestamp=datetime(2026, 7, 7, 11, 0, tzinfo=timezone.utc),
+                    open=100.3,
+                    high=100.9,
+                    low=100.2,
+                    close=100.4,
+                    volume=1_000_000,
+                ),
+            ]
+            orchestrator = _ShortOnlyGuardCycleOrchestrator(
+                config,
+                _FakeProvider([instrument], {"SBER": [candle]}, {"SBER": confirmation}),
+            )
+            regime = MarketRegime("weak_down_choppy", 0.8, {"breadth_down": 0.7})
+
+            with patch("samosbor.orchestrator.detect_market_regime", return_value=regime):
+                result = orchestrator.run_paper_cycle()
+
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+            signal_event = next(event for event in cycle_events if event.get("action") == "signal")
+
+            self.assertTrue(signal_event["approved"])
+            self.assertEqual(signal_event["direction"], "short")
+            self.assertNotEqual(signal_event["metadata"].get("entry_mode"), "wait")
+
+    def test_short_only_blocks_ml_negative_expected_edge(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = _write_basic_paper_config(root)
+            _enable_short_only_config(config_path)
+            config = load_config(config_path)
+            instrument = Instrument(symbol="SBER", instrument_type=InstrumentType.STOCK, lot_size=1)
+            candle = Candle(
+                timestamp=datetime(2026, 7, 7, 11, 0, tzinfo=timezone.utc),
+                open=100.5,
+                high=101.0,
+                low=99.5,
+                close=100.0,
+                volume=5_000_000,
+            )
+            orchestrator = _NegativeMlShortCycleOrchestrator(config, _FakeProvider([instrument], {"SBER": [candle]}))
+            regime = MarketRegime("clean_downtrend", 0.8, {"breadth_down": 1.0})
+
+            with patch("samosbor.orchestrator.detect_market_regime", return_value=regime):
+                result = orchestrator.run_paper_cycle()
+
+            cycle_events = json.loads(
+                (Path(result["output_dir"]) / "cycle_events.json").read_text(encoding="utf-8")
+            )["events"]
+            signal_event = next(event for event in cycle_events if event.get("action") == "signal")
+
+            self.assertFalse(signal_event["approved"])
+            self.assertIn("expected net edge", signal_event["reason"])
 
 
 class PaperCycleSessionFlatTest(unittest.TestCase):
