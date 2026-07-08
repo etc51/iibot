@@ -539,6 +539,69 @@ def test_review_missed_early_due_to_rolling_low_hard_block_zero():
     )
 
 
+def test_review_separates_legacy_rolling_low_hard_block():
+    opened = datetime(2026, 7, 8, 10, 0, tzinfo=timezone.utc)
+    short_only = {
+        "short_ev_engine_enabled": True,
+        "setup_id": "early_5m_acceleration_short",
+        "short_ev_decision": "shadow_only",
+        "hard_reasons": ["trigger_close_not_below_rolling_low"],
+    }
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=0.0),
+        [],
+        [
+            {
+                "timestamp": opened.isoformat(),
+                "action": "short_only_short_candidate",
+                "symbol": "SBER",
+                "metadata": {"short_only": short_only},
+            }
+        ],
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    review = payload["short_ev_review"]["early_5m_acceleration_review"]
+    assert review["missed_early_due_to_rolling_low_hard_block"] == 0
+    assert review["legacy_missed_early_due_to_rolling_low_hard_block"] == 1
+
+
+def test_review_counts_configured_rolling_low_hard_block():
+    opened = datetime(2026, 7, 8, 10, 0, tzinfo=timezone.utc)
+    short_only = {
+        "short_ev_engine_enabled": True,
+        "setup_id": "early_5m_acceleration_short",
+        "short_ev_decision": "shadow_only",
+        "hard_reasons": ["trigger_close_not_below_rolling_low"],
+        "early_5m": {
+            "rolling_low_required": True,
+            "rolling_low_broken": False,
+            "setup_quality": "early_acceleration_no_breakout",
+        },
+    }
+    payload = build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=0.0),
+        [],
+        [
+            {
+                "timestamp": opened.isoformat(),
+                "action": "short_only_short_candidate",
+                "symbol": "SBER",
+                "metadata": {"short_only": short_only},
+            }
+        ],
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+    review = payload["short_ev_review"]["early_5m_acceleration_review"]
+    assert review["missed_early_due_to_rolling_low_hard_block"] == 1
+    assert review["legacy_missed_early_due_to_rolling_low_hard_block"] == 0
+
+
 def test_trade_review_breaks_down_regime_policy_and_pending_rebound():
     opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
     trades = [

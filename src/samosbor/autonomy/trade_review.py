@@ -2216,6 +2216,13 @@ def _early_5m_acceleration_review(
         event
         for event in candidates
         if "trigger_close_not_below_rolling_low" in _event_reason_tokens(event)
+        and _event_early_5m(event).get("rolling_low_required") is True
+    ]
+    legacy_hard_rolling_low = [
+        event
+        for event in candidates
+        if "trigger_close_not_below_rolling_low" in _event_reason_tokens(event)
+        and not _event_early_5m(event)
     ]
     qualities = sorted(
         {
@@ -2234,6 +2241,7 @@ def _early_5m_acceleration_review(
         "blocked_by_1m_after_context_override": len(blocked_by_1m_after_context_override),
         "early_5m_blocked_by_1m_after_rolling_low_relax": len(blocked_by_1m_after_rolling_low_relax),
         "missed_early_due_to_rolling_low_hard_block": len(hard_rolling_low),
+        "legacy_missed_early_due_to_rolling_low_hard_block": len(legacy_hard_rolling_low),
         "ev_by_setup_quality": {
             quality: {
                 "candidates": len(
