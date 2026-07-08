@@ -425,6 +425,120 @@ def test_short_ev_review_reports_setup_ev_exits_costs_and_shadow_validation():
     assert review["shadow_validation"]["shadow_by_setup"]["golden_15m_breakout_short"] == 1
 
 
+def _early_5m_review_payload(*, early: dict[str, object], approved: bool = False) -> dict[str, object]:
+    opened = datetime(2026, 7, 8, 10, 0, tzinfo=timezone.utc)
+    short_only = {
+        "enabled": True,
+        "short_ev_engine_enabled": True,
+        "setup_id": "early_5m_acceleration_short",
+        "short_ev_decision": "real_allowed" if approved else "shadow_only",
+        "ev_net_rub": 42.0,
+        "ev_per_risk": 0.12,
+        "ev_confidence": 0.60,
+        "early_5m": early,
+        "costs": {
+            "entry_commission_rub": 2.0,
+            "exit_commission_rub": 2.0,
+            "spread_cost_rub": 1.0,
+            "slippage_cost_rub": 1.0,
+            "total_cost_rub": 6.0,
+        },
+        "hard_reasons": ["execution_1m_guard_blocked"]
+        if early.get("blocked_by_1m_after_context_override")
+        else [],
+    }
+    events = [
+        {
+            "timestamp": opened.isoformat(),
+            "action": "short_ev_engine_config",
+            "enabled": True,
+            "mode": "short_only_ev",
+            "allowed_setups": ["early_5m_acceleration_short"],
+            "allow_live_trading": False,
+            "execution_mode": "local-paper",
+        },
+        {
+            "timestamp": opened.isoformat(),
+            "action": "short_only_short_candidate",
+            "symbol": "SBER",
+            "metadata": {"short_only": short_only},
+        },
+        {
+            "timestamp": opened.isoformat(),
+            "action": "signal",
+            "symbol": "SBER",
+            "direction": "short",
+            "approved": approved,
+            "metadata": {"short_only": short_only},
+        },
+    ]
+    return build_trade_review_payload(
+        PortfolioState(cash=100_000, realized_pnl=0.0),
+        [],
+        events,
+        strategy=StrategySection(min_signal_strength=0.4),
+        risk=RiskSection(max_risk_per_trade=0.01),
+        timezone_name="Europe/Moscow",
+    )
+
+
+def test_review_reports_early_5m_rolling_low_quality_penalty():
+    payload = _early_5m_review_payload(
+        early={
+            "rolling_low_broken": False,
+            "setup_quality": "early_acceleration_no_breakout",
+            "quality_flags": ["trigger_close_not_below_rolling_low_quality_penalty"],
+            "context_override_used": False,
+        }
+    )
+
+    review = payload["short_ev_review"]["early_5m_acceleration_review"]
+    assert review["total_candidates"] == 1
+    assert review["rolling_low_broken_count"] == 0
+    assert review["rolling_low_not_broken_count"] == 1
+    assert review["rolling_low_quality_penalty_count"] == 1
+    assert review["missed_early_due_to_rolling_low_hard_block"] == 0
+    assert review["ev_by_setup_quality"]["early_acceleration_no_breakout"]["candidates"] == 1
+
+
+def test_review_reports_context_override_used():
+    payload = _early_5m_review_payload(
+        early={
+            "rolling_low_broken": False,
+            "setup_quality": "context_override_strict_5m_acceleration",
+            "quality_flags": ["trigger_close_not_below_rolling_low_quality_penalty"],
+            "context_override_used": True,
+            "blocked_by_1m_after_context_override": True,
+        },
+        approved=True,
+    )
+
+    review = payload["short_ev_review"]["early_5m_acceleration_review"]
+    assert review["context_override_used_count"] == 1
+    assert review["context_override_real_approved_count"] == 1
+    assert review["context_override_shadow_count"] == 0
+    assert review["blocked_by_1m_after_context_override"] == 1
+    assert review["ev_by_setup_quality"]["context_override_strict_5m_acceleration"]["real_approved"] == 1
+
+
+def test_review_missed_early_due_to_rolling_low_hard_block_zero():
+    payload = _early_5m_review_payload(
+        early={
+            "rolling_low_broken": False,
+            "setup_quality": "early_acceleration_no_breakout",
+            "quality_flags": ["trigger_close_not_below_rolling_low_quality_penalty"],
+            "context_override_used": False,
+        }
+    )
+
+    assert (
+        payload["short_ev_review"]["early_5m_acceleration_review"][
+            "missed_early_due_to_rolling_low_hard_block"
+        ]
+        == 0
+    )
+
+
 def test_trade_review_breaks_down_regime_policy_and_pending_rebound():
     opened = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
     trades = [

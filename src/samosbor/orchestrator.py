@@ -957,6 +957,9 @@ class TradingOrchestrator:
             if golden_3tf:
                 metadata["golden_3tf"] = golden_3tf
             if short_ev_result:
+                short_ev_early_5m = {}
+                if isinstance(short_ev_setup.get("indicators", {}), dict):
+                    short_ev_early_5m = dict(short_ev_setup.get("indicators", {}).get("early_5m", {}) or {})
                 metadata["short_ev_engine"] = {
                     "enabled": True,
                     "setup": short_ev_setup,
@@ -965,6 +968,8 @@ class TradingOrchestrator:
                     "setup_id": short_ev_setup.get("setup_id", ""),
                     "decision": ev_decision,
                 }
+                if short_ev_early_5m:
+                    metadata["short_ev_engine"]["early_5m"] = short_ev_early_5m
             short_only_metadata = dict(metadata.get("short_only", {}))
             short_only_metadata.update({
                 "enabled": True,
@@ -1008,6 +1013,8 @@ class TradingOrchestrator:
                         "ml_expected_net_edge_rub": short_ev_result.get("ml_expected_net_edge_rub"),
                     }
                 )
+                if short_ev_early_5m:
+                    short_only_metadata["early_5m"] = short_ev_early_5m
             if golden_3tf:
                 short_only_metadata.update(
                     {
@@ -1996,6 +2003,18 @@ class TradingOrchestrator:
                     "forbidden_timeframes": list(ev_timeframes.forbidden),
                     "allow_live_trading": self.config.execution.allow_live_trading,
                     "execution_mode": self.config.execution.mode.value,
+                    "early_5m_acceleration_short": {
+                        "require_rolling_low_break": ev_cfg.setups.early_5m_acceleration_short.require_rolling_low_break,
+                        "rolling_low_as_quality_bonus": ev_cfg.setups.early_5m_acceleration_short.rolling_low_as_quality_bonus,
+                        "size_multiplier_with_rolling_low": ev_cfg.setups.early_5m_acceleration_short.size_multiplier_with_rolling_low,
+                        "size_multiplier_without_rolling_low": ev_cfg.setups.early_5m_acceleration_short.size_multiplier_without_rolling_low,
+                        "context_override": {
+                            "enabled": ev_cfg.setups.early_5m_acceleration_short.context_override.enabled,
+                            "require_order_book_strict": ev_cfg.setups.early_5m_acceleration_short.context_override.require_order_book_strict,
+                            "require_1m_guard": ev_cfg.setups.early_5m_acceleration_short.context_override.require_1m_guard,
+                            "size_multiplier": ev_cfg.setups.early_5m_acceleration_short.context_override.size_multiplier,
+                        },
+                    },
                 }
             )
         if bool(self.config.golden_baseline.enabled):

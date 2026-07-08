@@ -973,7 +973,7 @@ class PaperCycleShortOnlyTest(unittest.TestCase):
                 slippage_bps=config.execution.slippage_bps,
                 commission_bps=config.execution.commission_bps,
             )
-            opened_at = datetime(2026, 7, 7, 9, 30, tzinfo=timezone.utc)
+            opened_at = datetime.now(timezone.utc).replace(hour=9, minute=30, second=0, microsecond=0)
             broker.open_position(
                 Signal(
                     instrument=instrument,
@@ -990,7 +990,7 @@ class PaperCycleShortOnlyTest(unittest.TestCase):
             broker.close_position(
                 "SBER",
                 price=103.0,
-                timestamp=datetime(2026, 7, 7, 10, 0, tzinfo=timezone.utc),
+                timestamp=opened_at.replace(hour=10, minute=0),
                 reason=ExitReason.STOP_LOSS,
             )
             broker.save(state_path)

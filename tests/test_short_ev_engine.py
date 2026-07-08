@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import samosbor.autonomy.short_ev_engine as short_ev_module
 from samosbor.autonomy.short_ev_engine import (
     ALLOWED_SHORT_SETUPS,
     CostEstimate,
@@ -102,6 +103,55 @@ def _setup(setup_id: str = "normal_15m_trend_short", passed: bool = True) -> Set
 
 def _costs(total: float = 12.0) -> CostEstimate:
     return CostEstimate(4.0, 4.0, 2.0, total - 10.0, total, 21.0)
+
+
+def _early_features(**overrides) -> dict[str, float]:
+    features = {
+        "ema9": 100.5,
+        "ema9_slope": -0.2,
+        "rsi": 32.0,
+        "macd_hist": -0.3,
+        "rolling_low_min": 99.0,
+        "rolling_low_max": 99.0,
+        "close_position": 0.20,
+        "ret_window": -0.01,
+    }
+    features.update(overrides)
+    return features
+
+
+def _patch_early_inputs(monkeypatch, *, normal_failures=None, features=None):
+    normal_failures = list(normal_failures or [])
+    features = dict(features or _early_features())
+
+    def fake_normal_setup(*args, **kwargs):
+        del args, kwargs
+        return SetupVerdict(
+            "normal_15m_trend_short",
+            not normal_failures,
+            "passed" if not normal_failures else "; ".join(normal_failures),
+            normal_failures,
+            0.5,
+            "test",
+            {"ema_fast": 99.0, "ema_slow": 100.0, "turnover_rub": 10_000_000.0},
+        )
+
+    monkeypatch.setattr(short_ev_module, "_normal_setup", fake_normal_setup)
+    monkeypatch.setattr(short_ev_module, "_trigger_features", lambda candles, trigger: features)
+
+
+def _early_verdict(monkeypatch, *, normal_failures=None, features=None, execution_guard=None, golden_3tf=None, regime="market_selloff_impulse"):
+    _patch_early_inputs(monkeypatch, normal_failures=normal_failures, features=features)
+    config = load_config("configs/server_tbank_stocks_intraday_300k_focused.toml")
+    return short_ev_module._early_setup(
+        _candles(3),
+        _candles(3, minutes=5, start=100.0),
+        execution_guard if execution_guard is not None else {"available": True, "passed": True},
+        config,
+        set(config.short_ev_engine.allowed_setups),
+        golden_3tf=golden_3tf or {},
+        market_regime=_Regime(regime),
+    )
 
 
 def test_allowed_setup_registry_exact():
@@ -233,6 +283,237 @@ def test_normal_15m_trend_short_candidate():
 
     assert verdict.setup_id in {"normal_15m_trend_short", "golden_15m_breakout_short"}
     assert verdict.passed is True
+
+
+def test_early_5m_does_not_require_rolling_low(monkeypatch):
+    verdict = _early_verdict(monkeypatch, features=_early_features(rolling_low_max=99.0))
+
+    assert verdict.passed is True
+    assert "trigger_close_not_below_rolling_low" not in verdict.failed_conditions
+    early = verdict.indicators["early_5m"]
+    assert early["rolling_low_broken"] is False
+    assert early["rolling_low_required"] is False
+    assert early["setup_quality"] == "early_acceleration_no_breakout"
+    assert "trigger_close_not_below_rolling_low_quality_penalty" in early["quality_flags"]
+    assert verdict.default_size_multiplier == 0.18
+
+
+def test_early_5m_rolling_low_break_adds_quality_bonus(monkeypatch):
+    verdict = _early_verdict(monkeypatch, features=_early_features(rolling_low_max=101.0))
+
+    assert verdict.passed is True
+    early = verdict.indicators["early_5m"]
+    assert early["rolling_low_broken"] is True
+    assert early["setup_quality"] == "early_breakdown"
+    assert early["quality_flags"] == []
+    assert early["size_multiplier_reason"] == "rolling_low_break_quality_bonus"
+    assert verdict.default_size_multiplier == 0.25
+
+
+def test_early_5m_without_rolling_low_can_pass_ev_gate(monkeypatch):
+    config = load_config("configs/server_tbank_stocks_intraday_300k_focused.toml")
+    verdict = _early_verdict(monkeypatch, features=_early_features(rolling_low_max=99.0))
+
+    result = estimate_short_setup_ev(
+        _signal(),
+        setup_verdict=verdict,
+        setup_stats=_stats(setup_id="early_5m_acceleration_short", sample_count=40, win_rate=0.70),
+        costs=_costs(),
+        quantity_lots=1,
+        config=config,
+    )
+
+    assert verdict.passed is True
+    assert result.decision == "real_allowed"
+
+
+def test_golden_breakout_still_requires_rolling_low(monkeypatch):
+    config = load_config("configs/server_tbank_stocks_intraday_300k_focused.toml")
+    monkeypatch.setattr(
+        short_ev_module,
+        "_baseline_features",
+        lambda candles, strategy: {
+            "ema_fast": 99.0,
+            "ema_slow": 100.0,
+            "adx": 30.0,
+            "macd_hist": -0.1,
+            "rsi": 35.0,
+        },
+    )
+    monkeypatch.setattr(short_ev_module, "average_turnover", lambda candles, window: 10_000_000.0)
+    monkeypatch.setattr(short_ev_module, "rolling_low", lambda candles, window: 99.0)
+
+    verdict = short_ev_module._normal_setup(
+        _candles(3, start=101.0),
+        config,
+        set(config.short_ev_engine.allowed_setups),
+        require_breakout=True,
+    )
+
+    assert verdict.passed is False
+    assert "close_not_below_rolling_low20" in verdict.failed_conditions
+
+
+def test_normal_15m_still_does_not_require_rolling_low(monkeypatch):
+    config = load_config("configs/server_tbank_stocks_intraday_300k_focused.toml")
+    monkeypatch.setattr(
+        short_ev_module,
+        "_baseline_features",
+        lambda candles, strategy: {
+            "ema_fast": 99.0,
+            "ema_slow": 100.0,
+            "adx": 30.0,
+            "macd_hist": -0.1,
+            "rsi": 35.0,
+        },
+    )
+    monkeypatch.setattr(short_ev_module, "average_turnover", lambda candles, window: 10_000_000.0)
+    monkeypatch.setattr(short_ev_module, "rolling_low", lambda candles, window: 99.0)
+
+    verdict = short_ev_module._normal_setup(
+        _candles(3, start=98.0),
+        config,
+        set(config.short_ev_engine.allowed_setups),
+        require_breakout=False,
+    )
+
+    assert verdict.passed is True
+    assert "close_not_below_rolling_low20" not in verdict.failed_conditions
+
+
+def test_early_5m_context_override_allows_strict_5m_acceleration(monkeypatch):
+    verdict = _early_verdict(
+        monkeypatch,
+        normal_failures=["ema20_not_below_ema50"],
+        features=_early_features(rolling_low_max=99.0),
+    )
+
+    assert verdict.passed is True
+    assert "context_ema20_not_below_ema50" not in verdict.failed_conditions
+    early = verdict.indicators["early_5m"]
+    assert early["context_override_used"] is True
+    assert early["context_override_reason"] == "strict_5m_acceleration_down"
+    assert early["original_15m_context_failed"] == ["context_ema20_not_below_ema50"]
+    assert early["size_multiplier_reason"] == "context_override_smaller_size"
+    assert verdict.default_size_multiplier == 0.15
+
+
+def test_early_5m_context_override_requires_5m_ema9_slope_negative(monkeypatch):
+    verdict = _early_verdict(
+        monkeypatch,
+        normal_failures=["ema20_not_below_ema50"],
+        features=_early_features(ema9_slope=0.1),
+    )
+
+    assert verdict.passed is False
+    assert "context_ema20_not_below_ema50" in verdict.failed_conditions
+    assert "trigger_ema9_slope_not_negative" in verdict.failed_conditions
+
+
+def test_early_5m_context_override_requires_5m_macd_hist_negative(monkeypatch):
+    verdict = _early_verdict(
+        monkeypatch,
+        normal_failures=["ema20_not_below_ema50"],
+        features=_early_features(macd_hist=0.1),
+    )
+
+    assert verdict.passed is False
+    assert "context_ema20_not_below_ema50" in verdict.failed_conditions
+    assert "trigger_macd_hist_not_negative" in verdict.failed_conditions
+
+
+def test_early_5m_context_override_requires_negative_ret_window(monkeypatch):
+    verdict = _early_verdict(
+        monkeypatch,
+        normal_failures=["ema20_not_below_ema50"],
+        features=_early_features(ret_window=0.001),
+    )
+
+    assert verdict.passed is False
+    assert "context_ema20_not_below_ema50" in verdict.failed_conditions
+
+
+def test_early_5m_context_override_requires_order_book(monkeypatch):
+    verdict = _early_verdict(
+        monkeypatch,
+        normal_failures=["ema20_not_below_ema50"],
+        features=_early_features(),
+        golden_3tf={"failed_conditions": ["order_book_imbalance_too_low"]},
+    )
+
+    assert verdict.passed is False
+    assert "order_book_imbalance_too_low" in verdict.failed_conditions
+    assert verdict.indicators["early_5m"]["order_book_strict_passed"] is False
+
+
+def test_early_5m_context_override_requires_1m_guard(monkeypatch):
+    verdict = _early_verdict(
+        monkeypatch,
+        normal_failures=["ema20_not_below_ema50"],
+        features=_early_features(),
+        execution_guard={"available": True, "passed": False},
+    )
+
+    assert verdict.passed is False
+    assert "execution_1m_guard_blocked" in verdict.failed_conditions
+    assert verdict.indicators["early_5m"]["blocked_by_1m_after_context_override"] is True
+
+
+def test_early_5m_context_override_still_blocks_range_chop(monkeypatch):
+    verdict = _early_verdict(
+        monkeypatch,
+        normal_failures=["ema20_not_below_ema50"],
+        features=_early_features(),
+        regime="range_chop",
+    )
+
+    assert verdict.passed is False
+    assert "context_ema20_not_below_ema50" in verdict.failed_conditions
+    assert verdict.indicators["early_5m"]["context_override_used"] is False
+
+
+def test_1m_guard_remains_required_for_early_5m(monkeypatch):
+    verdict = _early_verdict(
+        monkeypatch,
+        features=_early_features(),
+        execution_guard={"available": False, "passed": False},
+    )
+
+    assert verdict.passed is False
+    assert "execution_1m_unavailable" in verdict.failed_conditions
+
+
+def test_1m_guard_still_blocks_rebound(monkeypatch):
+    verdict = _early_verdict(
+        monkeypatch,
+        features=_early_features(),
+        execution_guard={
+            "available": True,
+            "passed": False,
+            "reason": "execution_1m_rebound_bars",
+        },
+    )
+
+    assert verdict.passed is False
+    assert "execution_1m_guard_blocked" in verdict.failed_conditions
+
+
+def test_ev_gate_required_for_early_5m(monkeypatch):
+    config = load_config("configs/server_tbank_stocks_intraday_300k_focused.toml")
+    verdict = _early_verdict(monkeypatch, features=_early_features())
+
+    result = estimate_short_setup_ev(
+        _signal(),
+        setup_verdict=verdict,
+        setup_stats=_stats(setup_id="early_5m_acceleration_short", sample_count=40, win_rate=0.10),
+        costs=_costs(total=30.0),
+        quantity_lots=1,
+        config=config,
+    )
+
+    assert verdict.passed is True
+    assert result.decision == "blocked_negative_ev"
+    assert result.reason == "setup_ev_below_min_after_costs"
 
 
 def test_no_long_real_trade():

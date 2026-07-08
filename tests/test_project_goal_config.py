@@ -152,6 +152,16 @@ def test_focused_runtime_matches_project_goal():
     assert config.short_ev_engine.timeframes.trigger == "5min"
     assert config.short_ev_engine.timeframes.execution_guard == "1min"
     assert config.short_ev_engine.timeframes.forbidden == ["10min"]
+    early_setup = config.short_ev_engine.setups.early_5m_acceleration_short
+    assert early_setup.require_rolling_low_break is False
+    assert early_setup.rolling_low_as_quality_bonus is True
+    assert early_setup.size_multiplier_with_rolling_low == 0.25
+    assert early_setup.size_multiplier_without_rolling_low == 0.18
+    assert early_setup.context_override.enabled is True
+    assert early_setup.context_override.allow_when_15m_ema_not_bearish is True
+    assert early_setup.context_override.require_order_book_strict is True
+    assert early_setup.context_override.require_1m_guard is True
+    assert early_setup.context_override.size_multiplier == 0.15
     assert config.regime_policy.weak_down_choppy.short_direct_probe_enabled is True
     assert config.regime_policy.weak_down_choppy.short_direct_probe_min_signal_strength == 0.15
     assert config.regime_policy.weak_down_choppy.short_direct_exploration_min_signal_strength == 0.08
@@ -344,3 +354,47 @@ def test_short_ev_engine_disabled_outside_local_paper(tmp_path: Path):
     assert config.short_ev_engine.enabled is False
     assert config.short_ev_engine.live_enabled is False
     assert config.execution.allow_live_trading is False
+
+
+def test_allow_live_trading_false():
+    config = load_config("configs/server_tbank_stocks_intraday_300k_focused.toml")
+
+    assert config.execution.allow_live_trading is False
+    assert config.short_ev_engine.live_enabled is False
+
+
+def test_long_disabled():
+    config = load_config("configs/server_tbank_stocks_intraday_300k_focused.toml")
+
+    assert config.short_ev_engine.long_enabled is False
+    assert config.side_policy.long.normal_enabled is False
+    assert config.market_selloff_impulse.long.allow_normal_long is False
+
+
+def test_range_chop_no_trade():
+    config = load_config("configs/server_tbank_stocks_intraday_300k_focused.toml")
+
+    assert config.short_ev_engine.range_chop_enabled is False
+    assert config.short_only.sizing.range_chop.target_gross_exposure == 0.0
+    assert config.short_only.sizing.range_chop.max_new_shorts_per_cycle == 0
+
+
+def test_synthetic_real_disabled():
+    config = load_config("configs/server_tbank_stocks_intraday_300k_focused.toml")
+
+    assert config.short_only.synthetic.real_trading_enabled is False
+    assert config.short_only.synthetic.shadow_only is True
+
+
+def test_ml_only_real_disabled():
+    config = load_config("configs/server_tbank_stocks_intraday_300k_focused.toml")
+
+    assert config.short_only.ml.ml_positive_standalone_real_trading is False
+    assert config.short_only.ml.positive_edge_is_required_but_not_sufficient is True
+
+
+def test_upsize_real_disabled():
+    config = load_config("configs/server_tbank_stocks_intraday_300k_focused.toml")
+
+    assert config.short_only.allow_existing_short_upsize is False
+    assert config.short_only.upsize.real_trading_enabled is False

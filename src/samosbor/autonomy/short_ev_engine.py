@@ -341,7 +341,15 @@ def classify_short_setup(
     if golden_entry == "golden_15m_breakout_short" and bool((golden_3tf or {}).get("passed", False)):
         return _setup(golden_entry, golden_entry in allowed, "passed", [], 1.0, golden_3tf or {}, "golden_3tf")
     if real_trade_source == "early_5m_starter" or golden_entry == "early_5m_acceleration_short":
-        return _early_setup(candles_15m, candles_5m, execution_guard or {}, config, allowed)
+        return _early_setup(
+            candles_15m,
+            candles_5m,
+            execution_guard or {},
+            config,
+            allowed,
+            golden_3tf=golden_3tf,
+            market_regime=market_regime,
+        )
     selloff = _market_selloff_setup(signal, candles_15m, market_regime, config, allowed)
     if selloff.passed:
         return selloff
@@ -476,37 +484,151 @@ def _early_setup(
     execution_guard: dict[str, Any],
     config,
     allowed: set[str],
+    *,
+    golden_3tf: dict[str, Any] | None = None,
+    market_regime=None,
 ) -> SetupVerdict:
     failed: list[str] = []
     setup_id = "early_5m_acceleration_short"
+    early_cfg = config.short_ev_engine.setups.early_5m_acceleration_short
+    override_cfg = early_cfg.context_override
     normal_context = _normal_setup(candles_15m, config, allowed, require_breakout=False)
-    failed.extend([f"context_{item}" for item in normal_context.failed_conditions if item != "close_not_below_rolling_low20"])
+    original_context_failed: list[str] = []
+    context_override_used = False
+    context_override_reason = ""
+    strict_acceleration_down = False
+    rsi_below_25_selloff_acceleration = False
+    order_book_failures = _early_order_book_failures(golden_3tf or {})
     if not candles_5m:
+        failed.extend(
+            [
+                f"context_{item}"
+                for item in normal_context.failed_conditions
+                if item != "close_not_below_rolling_low20"
+            ]
+        )
         failed.append("missing_5m_candles")
         indicators: dict[str, Any] = {"context_15m": normal_context.indicators}
+        rolling_low_broken = False
+        setup_quality = "unknown"
+        quality_flags: list[str] = []
+        size_multiplier = float(early_cfg.size_multiplier_without_rolling_low)
+        size_multiplier_reason = "missing_5m_candles"
     else:
         trigger = config.golden_baseline.early_5m.trigger
         features_5m = _trigger_features(candles_5m, trigger)
         indicators = {"context_15m": normal_context.indicators, "trigger_5m": features_5m}
         latest = candles_5m[-1]
+        strict_acceleration_down = _early_strict_5m_acceleration_down(
+            features_5m,
+            latest,
+            override_cfg,
+        )
+        rsi_value = _safe_float(features_5m.get("rsi"))
+        rsi_below_25_selloff_acceleration = (
+            rsi_value is not None
+            and rsi_value < 25.0
+            and strict_acceleration_down
+            and getattr(market_regime, "regime", "") == "market_selloff_impulse"
+        )
+        context_override_eligible = (
+            bool(override_cfg.enabled)
+            and bool(override_cfg.allow_when_15m_ema_not_bearish)
+            and strict_acceleration_down
+            and getattr(market_regime, "regime", "") != "range_chop"
+        )
+        for item in normal_context.failed_conditions:
+            if item == "close_not_below_rolling_low20":
+                continue
+            context_reason = f"context_{item}"
+            if item == "ema20_not_below_ema50" and context_override_eligible:
+                original_context_failed.append(context_reason)
+                context_override_used = True
+                context_override_reason = "strict_5m_acceleration_down"
+                continue
+            failed.append(context_reason)
         if not _feature_lt_value(features_5m, "ema9_slope", 0.0):
             failed.append("trigger_ema9_slope_not_negative")
         if _safe_float(features_5m.get("ema9")) is None or latest.close > float(features_5m["ema9"]):
             failed.append("trigger_close_above_ema9")
         if not _feature_lt_value(features_5m, "macd_hist", 0.0):
             failed.append("trigger_macd_hist_not_negative")
-        if not _feature_between(features_5m, "rsi", 25.0, 55.0):
+        if not _feature_between(features_5m, "rsi", 25.0, 55.0) and not rsi_below_25_selloff_acceleration:
             failed.append("trigger_rsi_outside_band")
         rolling_low_max = _safe_float(features_5m.get("rolling_low_max"))
-        if rolling_low_max is None or latest.close > rolling_low_max:
-            failed.append("trigger_close_not_below_rolling_low")
+        rolling_low_broken = rolling_low_max is not None and latest.close <= rolling_low_max
+        setup_quality = "early_breakdown" if rolling_low_broken else "early_acceleration_no_breakout"
+        quality_flags = []
+        if not rolling_low_broken:
+            quality_flags.append("trigger_close_not_below_rolling_low_quality_penalty")
+            if bool(early_cfg.require_rolling_low_break):
+                failed.append("trigger_close_not_below_rolling_low")
         if (_safe_float(features_5m.get("close_position")) or 1.0) > 0.35:
             failed.append("trigger_close_position_too_high")
+        if context_override_used:
+            setup_quality = "context_override_strict_5m_acceleration"
+            size_multiplier = float(override_cfg.size_multiplier)
+            size_multiplier_reason = "context_override_smaller_size"
+        elif rolling_low_broken:
+            size_multiplier = float(early_cfg.size_multiplier_with_rolling_low)
+            size_multiplier_reason = "rolling_low_break_quality_bonus"
+        else:
+            size_multiplier = float(early_cfg.size_multiplier_without_rolling_low)
+            size_multiplier_reason = "rolling_low_not_broken_smaller_size"
+    failed.extend(order_book_failures)
     if not bool(execution_guard.get("available", False)):
         failed.append("execution_1m_unavailable")
     elif not bool(execution_guard.get("passed", False)):
         failed.append("execution_1m_guard_blocked")
-    return _setup(setup_id, not failed and setup_id in allowed, "passed" if not failed else "; ".join(failed), failed, 0.25, indicators, "registry")
+    indicators["early_5m"] = {
+        "rolling_low_broken": bool(rolling_low_broken),
+        "rolling_low_required": bool(early_cfg.require_rolling_low_break),
+        "setup_quality": setup_quality,
+        "quality_flags": quality_flags,
+        "size_multiplier_reason": size_multiplier_reason,
+        "context_override_used": bool(context_override_used),
+        "context_override_reason": context_override_reason,
+        "original_15m_context_failed": original_context_failed,
+        "rsi_below_25_selloff_acceleration": bool(rsi_below_25_selloff_acceleration),
+        "strict_5m_acceleration_down": bool(strict_acceleration_down),
+        "order_book_strict_passed": not bool(order_book_failures),
+        "order_book_failures": list(order_book_failures),
+        "blocked_by_1m_after_context_override": bool(
+            context_override_used and "execution_1m_guard_blocked" in failed
+        ),
+    }
+    return _setup(
+        setup_id,
+        not failed and setup_id in allowed,
+        "passed" if not failed else "; ".join(failed),
+        failed,
+        size_multiplier,
+        indicators,
+        "registry",
+    )
+
+
+def _early_order_book_failures(golden_3tf: dict[str, Any]) -> list[str]:
+    if not isinstance(golden_3tf, dict):
+        return []
+    conditions = golden_3tf.get("failed_conditions", [])
+    if not isinstance(conditions, list):
+        return []
+    return [str(item) for item in conditions if str(item).startswith("order_book_")]
+
+
+def _early_strict_5m_acceleration_down(features_5m: dict[str, Any], latest: Candle, override_cfg) -> bool:
+    checks = []
+    if bool(override_cfg.require_5m_ema9_slope_negative):
+        checks.append(_feature_lt_value(features_5m, "ema9_slope", 0.0))
+    if bool(override_cfg.require_5m_macd_hist_negative):
+        checks.append(_feature_lt_value(features_5m, "macd_hist", 0.0))
+    if bool(override_cfg.require_5m_ret_window_negative):
+        checks.append(_feature_lt_value(features_5m, "ret_window", 0.0))
+    if bool(override_cfg.require_5m_close_below_ema9):
+        ema9 = _safe_float(features_5m.get("ema9"))
+        checks.append(ema9 is not None and latest.close <= ema9)
+    return all(checks)
 
 
 def _failed_rebound_setup(

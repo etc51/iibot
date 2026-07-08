@@ -1451,6 +1451,7 @@ def _short_ev_review(
         for event in candidate_events
         if isinstance(_event_short_only(event).get("costs", {}), dict)
     ]
+    early_5m_review = _early_5m_acceleration_review(candidate_events, signal_events, short_ev_reviews)
     gross_pnl = sum(abs(float(review.get("gross_pnl_rub", 0.0) or 0.0)) for review in short_ev_reviews)
     costs_total = {
         "commission_total": round(
@@ -1474,6 +1475,7 @@ def _short_ev_review(
             setup_id: sum(1 for event in candidate_events if _event_setup_id(event) == setup_id)
             for setup_id in allowed_setups
         },
+        "early_5m_acceleration_review": early_5m_review,
         "exit_performance": {
             "breakeven_armed_count": sum(1 for event in events if event.get("action") == "short_net_breakeven_armed"),
             "breakeven_saved_losses": sum(
@@ -2097,6 +2099,22 @@ def _review_short_ev_engine(review: dict[str, object]) -> dict[str, object]:
     return dict(engine) if isinstance(engine, dict) else {}
 
 
+def _event_early_5m(event: dict[str, object]) -> dict[str, object]:
+    short_only = _event_short_only(event)
+    early = short_only.get("early_5m", {})
+    return dict(early) if isinstance(early, dict) else {}
+
+
+def _review_early_5m(review: dict[str, object]) -> dict[str, object]:
+    short_only = _review_short_only(review)
+    early = short_only.get("early_5m", {})
+    if isinstance(early, dict):
+        return dict(early)
+    engine = _review_short_ev_engine(review)
+    early = engine.get("early_5m", {})
+    return dict(early) if isinstance(early, dict) else {}
+
+
 def _event_setup_id(event: dict[str, object]) -> str:
     short_only = _event_short_only(event)
     return canonical_setup_id(short_only.get("setup_id", ""))
@@ -2154,6 +2172,145 @@ def _setup_real_enabled_reason(
         if reason:
             return reason
     return "waiting_for_candidates"
+
+
+def _early_5m_acceleration_review(
+    candidate_events: list[dict[str, object]],
+    signal_events: list[dict[str, object]],
+    short_ev_reviews: list[dict[str, object]],
+) -> dict[str, object]:
+    setup_id = "early_5m_acceleration_short"
+    candidates = [event for event in candidate_events if _event_setup_id(event) == setup_id]
+    signals = [event for event in signal_events if _event_setup_id(event) == setup_id]
+    reviews = [review for review in short_ev_reviews if _review_setup_id(review) == setup_id]
+    rolling_low_broken = [event for event in candidates if bool(_event_early_5m(event).get("rolling_low_broken"))]
+    rolling_low_not_broken = [
+        event
+        for event in candidates
+        if _event_early_5m(event) and not bool(_event_early_5m(event).get("rolling_low_broken"))
+    ]
+    quality_penalty = [
+        event
+        for event in candidates
+        if "trigger_close_not_below_rolling_low_quality_penalty"
+        in _early_5m_quality_flags(_event_early_5m(event))
+    ]
+    context_override_candidates = [
+        event for event in candidates if bool(_event_early_5m(event).get("context_override_used"))
+    ]
+    context_override_signals = [
+        event for event in signals if bool(_event_early_5m(event).get("context_override_used"))
+    ]
+    blocked_by_1m_after_context_override = [
+        event
+        for event in context_override_candidates
+        if bool(_event_early_5m(event).get("blocked_by_1m_after_context_override"))
+        or "execution_1m_guard_blocked" in _event_reason_tokens(event)
+    ]
+    blocked_by_1m_after_rolling_low_relax = [
+        event
+        for event in quality_penalty
+        if "execution_1m_guard_blocked" in _event_reason_tokens(event)
+    ]
+    hard_rolling_low = [
+        event
+        for event in candidates
+        if "trigger_close_not_below_rolling_low" in _event_reason_tokens(event)
+    ]
+    qualities = sorted(
+        {
+            str(_event_early_5m(event).get("setup_quality", "unknown") or "unknown")
+            for event in candidates
+        }
+    )
+    return {
+        "total_candidates": len(candidates),
+        "rolling_low_broken_count": len(rolling_low_broken),
+        "rolling_low_not_broken_count": len(rolling_low_not_broken),
+        "rolling_low_quality_penalty_count": len(quality_penalty),
+        "context_override_used_count": len(context_override_candidates),
+        "context_override_real_approved_count": sum(1 for event in context_override_signals if bool(event.get("approved", False))),
+        "context_override_shadow_count": sum(1 for event in context_override_signals if not bool(event.get("approved", False))),
+        "blocked_by_1m_after_context_override": len(blocked_by_1m_after_context_override),
+        "early_5m_blocked_by_1m_after_rolling_low_relax": len(blocked_by_1m_after_rolling_low_relax),
+        "missed_early_due_to_rolling_low_hard_block": len(hard_rolling_low),
+        "ev_by_setup_quality": {
+            quality: {
+                "candidates": len(
+                    [
+                        event
+                        for event in candidates
+                        if str(_event_early_5m(event).get("setup_quality", "unknown") or "unknown") == quality
+                    ]
+                ),
+                "signals": len(
+                    [
+                        event
+                        for event in signals
+                        if str(_event_early_5m(event).get("setup_quality", "unknown") or "unknown") == quality
+                    ]
+                ),
+                "real_approved": sum(
+                    1
+                    for event in signals
+                    if str(_event_early_5m(event).get("setup_quality", "unknown") or "unknown") == quality
+                    and bool(event.get("approved", False))
+                ),
+                "shadow": sum(
+                    1
+                    for event in signals
+                    if str(_event_early_5m(event).get("setup_quality", "unknown") or "unknown") == quality
+                    and not bool(event.get("approved", False))
+                ),
+                "avg_ev_net_rub": round(
+                    _avg(
+                        [
+                            _float(_event_short_only(event).get("ev_net_rub"))
+                            for event in candidates
+                            if str(_event_early_5m(event).get("setup_quality", "unknown") or "unknown") == quality
+                        ]
+                    ),
+                    2,
+                ),
+                "avg_ev_per_risk": round(
+                    _avg(
+                        [
+                            _float(_event_short_only(event).get("ev_per_risk"))
+                            for event in candidates
+                            if str(_event_early_5m(event).get("setup_quality", "unknown") or "unknown") == quality
+                        ]
+                    ),
+                    6,
+                ),
+                "pnl": _pnl_for_reviews(
+                    [
+                        review
+                        for review in reviews
+                        if str(_review_early_5m(review).get("setup_quality", "unknown") or "unknown") == quality
+                    ]
+                ),
+            }
+            for quality in qualities
+        },
+    }
+
+
+def _early_5m_quality_flags(early: dict[str, object]) -> list[str]:
+    flags = early.get("quality_flags", [])
+    if isinstance(flags, list):
+        return [str(item) for item in flags]
+    return []
+
+
+def _event_reason_tokens(event: dict[str, object]) -> list[str]:
+    tokens: list[str] = []
+    raw_reasons = [*_short_only_hard_reasons(event), event.get("reason", "")]
+    for raw in raw_reasons:
+        for part in str(raw or "").split(";"):
+            token = part.strip()
+            if token:
+                tokens.append(token)
+    return list(dict.fromkeys(tokens))
 
 
 def _short_ev_recommendations(ev_by_setup: list[dict[str, object]]) -> list[dict[str, object]]:

@@ -572,6 +572,24 @@ allow_exits = true
 allow_shadow_candidates = true
 reset_next_session = true
 
+[short_ev_engine.setups.early_5m_acceleration_short]
+require_rolling_low_break = false
+rolling_low_as_quality_bonus = true
+size_multiplier_with_rolling_low = 0.25
+size_multiplier_without_rolling_low = 0.18
+
+[short_ev_engine.setups.early_5m_acceleration_short.context_override]
+enabled = true
+allow_when_15m_ema_not_bearish = true
+require_5m_ema9_slope_negative = true
+require_5m_macd_hist_negative = true
+require_5m_ret_window_negative = true
+require_5m_close_below_ema9 = true
+require_order_book_strict = true
+require_1m_guard = true
+size_multiplier = 0.15
+shadow_if_ev_not_positive = true
+
 [short_only.sizing.market_selloff_impulse]
 target_gross_exposure = 1.00
 max_gross_exposure = 1.25

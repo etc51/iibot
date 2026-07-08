@@ -608,6 +608,38 @@ class ShortEvDamageGuardSection:
 
 
 @dataclass(frozen=True)
+class ShortEvEarly5mContextOverrideSection:
+    enabled: bool = True
+    allow_when_15m_ema_not_bearish: bool = True
+    require_5m_ema9_slope_negative: bool = True
+    require_5m_macd_hist_negative: bool = True
+    require_5m_ret_window_negative: bool = True
+    require_5m_close_below_ema9: bool = True
+    require_order_book_strict: bool = True
+    require_1m_guard: bool = True
+    size_multiplier: float = 0.15
+    shadow_if_ev_not_positive: bool = True
+
+
+@dataclass(frozen=True)
+class ShortEvEarly5mSetupSection:
+    require_rolling_low_break: bool = False
+    rolling_low_as_quality_bonus: bool = True
+    size_multiplier_with_rolling_low: float = 0.25
+    size_multiplier_without_rolling_low: float = 0.18
+    context_override: ShortEvEarly5mContextOverrideSection = field(
+        default_factory=ShortEvEarly5mContextOverrideSection
+    )
+
+
+@dataclass(frozen=True)
+class ShortEvSetupsSection:
+    early_5m_acceleration_short: ShortEvEarly5mSetupSection = field(
+        default_factory=ShortEvEarly5mSetupSection
+    )
+
+
+@dataclass(frozen=True)
 class ShortEvEngineSection:
     enabled: bool = False
     mode: str = "short_only_ev"
@@ -630,6 +662,7 @@ class ShortEvEngineSection:
     exits: ShortEvExitsSection = field(default_factory=ShortEvExitsSection)
     timeframes: ShortEvTimeframesSection = field(default_factory=ShortEvTimeframesSection)
     damage_guard: ShortEvDamageGuardSection = field(default_factory=ShortEvDamageGuardSection)
+    setups: ShortEvSetupsSection = field(default_factory=ShortEvSetupsSection)
 
 
 @dataclass(frozen=True)
@@ -1534,6 +1567,31 @@ def _parse_short_ev_engine(payload: dict[str, Any] | None, *, execution_mode: Tr
                 raw.get("damage_guard", {}) if isinstance(raw.get("damage_guard"), dict) else {},
             ),
         }
+    )
+    setups_raw = raw.get("setups", {}) if isinstance(raw.get("setups"), dict) else {}
+    early_raw = (
+        setups_raw.get("early_5m_acceleration_short", {})
+        if isinstance(setups_raw.get("early_5m_acceleration_short"), dict)
+        else {}
+    )
+    override_raw = (
+        early_raw.get("context_override", {})
+        if isinstance(early_raw.get("context_override"), dict)
+        else {}
+    )
+    default_early = default.setups.early_5m_acceleration_short
+    early_values = {
+        **default_early.__dict__,
+        **_dataclass_payload(ShortEvEarly5mSetupSection, early_raw),
+    }
+    early_values["context_override"] = ShortEvEarly5mContextOverrideSection(
+        **{
+            **default_early.context_override.__dict__,
+            **_dataclass_payload(ShortEvEarly5mContextOverrideSection, override_raw),
+        }
+    )
+    values["setups"] = ShortEvSetupsSection(
+        early_5m_acceleration_short=ShortEvEarly5mSetupSection(**early_values)
     )
     if execution_mode != TradeMode.LOCAL_PAPER:
         values["enabled"] = False
